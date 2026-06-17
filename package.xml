@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>my_package</name>
+  <version>0.0.0</version>
+  <description>My ROS2 package</description>
+
+  <maintainer email="user@example.com">user</maintainer>
+  <license>Apache-2.0</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>irobot_create_msgs</exec_depend>
+  <exec_depend>builtin_interfaces</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <buildtool_depend>ament_python</buildtool_depend>
+  </export>
+</package>
