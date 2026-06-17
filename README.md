@@ -11,3 +11,4 @@
 2. pw : turtlebot4
 3. turtlebot4-service-restart
 4. 대기
+5. exit
