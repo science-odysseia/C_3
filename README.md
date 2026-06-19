@@ -5,6 +5,10 @@
 2. 최종 발표 ppt
 
 
+business requirement
+
+내부설계
+
 재실행절차
 
 1. ssh ubuntu@(ip주소)
