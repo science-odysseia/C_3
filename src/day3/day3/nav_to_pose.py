@@ -32,7 +32,7 @@ def main():
         navigator.dock()
 
     # Set initial pose
-    initial_pose = navigator.getPoseStamped([0.0, 0.0], TurtleBot4Directions.NORTH)
+    initial_pose = navigator.getPoseStamped([-0.1718821734565192, 0.1102970552966071], TurtleBot4Directions.NORTH)
     navigator.setInitialPose(initial_pose)
 
     # Wait for Nav2
@@ -40,7 +40,7 @@ def main():
 
     # Set goal poses
     # goal_pose = navigator.getPoseStamped([-13.0, 9.0], TurtleBot4Directions.EAST)
-    goal_pose = navigator.getPoseStamped([-1.55, 0.066], TurtleBot4Directions.EAST)
+    goal_pose = navigator.getPoseStamped([-3.169, -0.118], TurtleBot4Directions.EAST)
 
 #   Position(-1.55069, 0.0668084, 0), Orientation(0, 0, -0.962154, 0.272507) = Angle: -2.5896
 

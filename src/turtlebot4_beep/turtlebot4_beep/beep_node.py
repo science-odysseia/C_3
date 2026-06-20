@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import rclpy
 from rclpy.node import Node
 
@@ -6,6 +8,7 @@ from builtin_interfaces.msg import Duration
 
 
 class BeepNode(Node):
+
     def __init__(self):
         super().__init__('beep_node')
 
@@ -16,76 +19,87 @@ class BeepNode(Node):
         )
 
         self.done = False
+        self.published = False
+        self.shutdown_timer = None
 
-        # 시작 후 1초 뒤 1회 실행
         self.timer = self.create_timer(
-            1.0,
-            self.publish_beep
+            0.5,
+            self.check_and_publish
         )
 
+    def check_and_publish(self):
+        if self.done or self.published:
+            return
+
+        if self.pub.get_subscription_count() == 0:
+            self.get_logger().info(
+                'Waiting for cmd_audio subscriber...'
+            )
+            return
+
+        self.publish_beep()
+
     def publish_beep(self):
-        if self.done:
+        if self.published:
             return
 
         msg = AudioNoteVector()
         msg.append = False
 
         notes_data = [
-            # 1절
-            (659,0,400000000), # 미
-            (494,0,200000000), # 시
-            (523,0,200000000), # 도
-            (587,0,400000000), # 레
-            (523,0,200000000), # 도
-            (494,0,200000000), # 시
+            (659, 0, 400000000),
+            (494, 0, 200000000),
+            (523, 0, 200000000),
+            (587, 0, 400000000),
+            (523, 0, 200000000),
+            (494, 0, 200000000),
 
-            (440,0,400000000), # 라
-            (440,0,200000000), # 라
-            (523,0,200000000), # 도
-            (659,0,400000000), # 미
-            (587,0,200000000), # 레
-            (523,0,200000000), # 도
+            (440, 0, 400000000),
+            (440, 0, 200000000),
+            (523, 0, 200000000),
+            (659, 0, 400000000),
+            (587, 0, 200000000),
+            (523, 0, 200000000),
 
-            (494,0,400000000), # 시
-            (494,0,200000000), # 시
-            (523,0,200000000), # 도
-            (587,0,400000000), # 레
-            (659,0,400000000), # 미
+            (494, 0, 400000000),
+            (494, 0, 200000000),
+            (523, 0, 200000000),
+            (587, 0, 400000000),
+            (659, 0, 400000000),
 
-            (523,0,400000000), # 도
-            (440,0,400000000), # 라
-            (440,0,800000000), # 라
+            (523, 0, 400000000),
+            (440, 0, 400000000),
+            (440, 0, 800000000),
 
-            # 2절
-            (0, 0, 200000000), 
-            (587,0,400000000), # 레
-            (698,0,200000000), # 파
-            (880,0,400000000), # 라
-            (784,0,200000000), # 솔
-            (698,0,200000000), # 파
+            (587, 0, 200000000),
+            (587, 0, 400000000),
+            (698, 0, 200000000),
+            (880, 0, 400000000),
+            (784, 0, 200000000),
+            (698, 0, 200000000),
 
-            (659,0,800000000), # 미
-            (523,0,200000000), # 도
-            (659,0,400000000), # 미
-            (587,0,200000000), # 레
-            (523,0,200000000), # 도
+            (659, 0, 400000000),
+            (659, 0, 200000000),
+            (523, 0, 200000000),
+            (659, 0, 400000000),
+            (587, 0, 200000000),
+            (523, 0, 200000000),
 
-            (494,0,400000000), # 시
+            (494, 0, 400000000),
 
-            # 3절
-            (494,0,200000000), # 시
-            (523,0,200000000), # 도
-            (587,0,400000000), # 레
-            (659,0,400000000), # 미
+            (494, 0, 200000000),
+            (523, 0, 200000000),
+            (587, 0, 400000000),
+            (659, 0, 400000000),
 
-            (523,0,400000000), # 도
-            (440,0,400000000), # 라
-            (440,0,400000000), # 라
+            (523, 0, 400000000),
+            (440, 0, 400000000),
+            (440, 0, 400000000),
         ]
 
         for freq, sec, nanosec in notes_data:
             note = AudioNote()
-            note.frequency = freq
+            note.frequency = int(freq)
             note.max_runtime = Duration(
                 sec=sec,
                 nanosec=nanosec
@@ -93,10 +107,24 @@ class BeepNode(Node):
             msg.notes.append(note)
 
         self.pub.publish(msg)
-        self.get_logger().info('Published melody')
+        self.published = True
 
-        self.done = True
+        self.get_logger().info('Published melody once')
+
         self.timer.cancel()
+
+        self.shutdown_timer = self.create_timer(
+            2.0,
+            self.finish
+        )
+
+    def finish(self):
+        self.done = True
+
+        if self.shutdown_timer:
+            self.shutdown_timer.cancel()
+
+        self.get_logger().info('Beep node finished')
 
 
 def main(args=None):

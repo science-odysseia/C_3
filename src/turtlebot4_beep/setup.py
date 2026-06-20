@@ -30,6 +30,7 @@ setup(
             'image_publisher = turtlebot4_beep.image_pub:main',
             'data_subscriber = turtlebot4_beep.data_sub:main',
             'data_publisher = turtlebot4_beep.data_pub:main',
+            'beep_test = turtlebot4_beep.beep_test:main',
         ],
     },
 )

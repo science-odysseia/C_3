@@ -2,7 +2,8 @@ from setuptools import find_packages, setup
 import os
 from glob import glob
 
-package_name = 'img_pkg'
+
+package_name = 'miniproject'
 
 setup(
     name=package_name,
@@ -27,13 +28,9 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'img_raw1= img_pkg.image_viewer:main',
-            'img_comp= img_pkg.image_comp:main',
-            'img_yolo= img_pkg.image_yolo:main',
-            'img_depth= img_pkg.image_depth:main',
-            'img_record= img_pkg.image_record:main',
-            'img_photo= img_pkg.image_photo:main',
-            'img_depth_comp= img_pkg.image_depth_comp:main',
+            'img_yolo = miniproject.image_yolo:main',
+            'img_yolo_higher = miniproject.image_yolo_higher:main',
+            'nav_to_pose = miniproject.nav_to_pose:main',
         ],
     },
 )

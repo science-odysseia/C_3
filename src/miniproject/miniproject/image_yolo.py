@@ -15,7 +15,7 @@ class YoloCompressedViewer(Node):
     def __init__(self):
         super().__init__('yolo_compressed_viewer')
 
-        self.model = YOLO('/home/yswbulb/turtlebot4_ws/best.pt')
+        self.model = YOLO('/home/yswbulb/turtlebot4_ws/best_amr.pt')
 
         self.subscription = self.create_subscription(
             CompressedImage,
