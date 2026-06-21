@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-import threading
+import time
 
 import rclpy
 from std_msgs.msg import Bool
@@ -21,13 +21,15 @@ def main():
 
     cmd_vel_pub = navigator.create_publisher(
         Twist,
-        '/robot3/cmd_vel',
+        'cmd_vel',
         10
     )
 
     def stop_robot():
         msg = Twist()
-        cmd_vel_pub.publish(msg)
+        for _ in range(5):
+            cmd_vel_pub.publish(msg)
+            time.sleep(0.05)
 
     def detected_callback(msg):
         nonlocal detected
@@ -45,41 +47,49 @@ def main():
 
     navigator.create_subscription(
         Bool,
-        '/robot3/is_detected',
+        'is_detected',
         detected_callback,
         10
     )
 
-    spin_thread = threading.Thread(
-        target=rclpy.spin,
-        args=(navigator,),
-        daemon=True
-    )
-    spin_thread.start()
-
-    if not navigator.getDockedStatus():
-        navigator.info('Docking before intialising pose')
-        navigator.dock()
+    navigator.info('Nav node started')
 
     initial_pose = navigator.getPoseStamped(
         [-0.1718821734565192, 0.1102970552966071],
         TurtleBot4Directions.NORTH
     )
+
+    navigator.info('Setting initial pose')
     navigator.setInitialPose(initial_pose)
 
+    navigator.info('Waiting for Nav2 active')
     navigator.waitUntilNav2Active()
+
+    navigator.info('Undocking')
+    navigator.undock()
+
+    time.sleep(1.0)
 
     goal_pose = navigator.getPoseStamped(
         [-3.169, -0.118],
         TurtleBot4Directions.EAST
     )
 
-    navigator.undock()
+    navigator.info('Starting navigation to goal')
+    navigator.startToPose(goal_pose)
 
-    if not detected:
-        navigator.startToPose(goal_pose)
+    while rclpy.ok() and not navigator.isTaskComplete():
+        rclpy.spin_once(navigator, timeout_sec=0.1)
+
+        if detected:
+            navigator.info('Detected flag true. Navigation loop ending.')
+            break
+
+        time.sleep(0.1)
 
     stop_robot()
+
+    navigator.info('Navigation node finished')
 
     navigator.destroy_node()
 

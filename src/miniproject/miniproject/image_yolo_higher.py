@@ -10,6 +10,7 @@ import torch
 from rclpy.node import Node
 from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import Bool
+from geometry_msgs.msg import Point
 from ultralytics import YOLO
 
 
@@ -38,6 +39,12 @@ class YoloCompressedViewer(Node):
             10
         )
 
+        self.center_pub = self.create_publisher(
+            Point,
+            '/robot3/detected_center',
+            10
+        )
+
         self.detect_start_time = None
         self.is_detected = False
 
@@ -52,6 +59,17 @@ class YoloCompressedViewer(Node):
         msg = Bool()
         msg.data = self.is_detected
         self.detect_pub.publish(msg)
+
+    def publish_detected_center(self, center_x, center_y):
+        if not self.is_detected:
+            return
+
+        msg = Point()
+        msg.x = float(center_x)
+        msg.y = float(center_y)
+        msg.z = 0.0
+
+        self.center_pub.publish(msg)
 
     def get_white_ratio(self, frame, xyxy):
         h, w = frame.shape[:2]
@@ -73,6 +91,13 @@ class YoloCompressedViewer(Node):
         white_ratio = np.sum(white_mask) / white_mask.size
 
         return white_ratio
+
+    def get_box_center(self, xyxy):
+        x1, y1, x2, y2 = xyxy
+        center_x = (x1 + x2) / 2.0
+        center_y = (y1 + y2) / 2.0
+
+        return center_x, center_y
 
     def update_detection_state(self, detected_now):
         now = self.get_clock().now().nanoseconds / 1e9
@@ -102,6 +127,7 @@ class YoloCompressedViewer(Node):
         boxes = result.boxes
 
         detected_now = False
+        target_center = None
 
         if boxes is not None and len(boxes) > 0:
             my_car_indices = []
@@ -115,7 +141,12 @@ class YoloCompressedViewer(Node):
             if len(my_car_indices) > 0:
                 detected_now = True
 
-            if len(my_car_indices) >= 2:
+            if len(my_car_indices) == 1:
+                target_idx = my_car_indices[0]
+                xyxy = boxes[target_idx].xyxy[0].cpu().numpy()
+                target_center = self.get_box_center(xyxy)
+
+            elif len(my_car_indices) >= 2:
                 best_idx = None
                 best_white_ratio = -1.0
 
@@ -126,6 +157,10 @@ class YoloCompressedViewer(Node):
                     if white_ratio > best_white_ratio:
                         best_white_ratio = white_ratio
                         best_idx = i
+
+                if best_idx is not None:
+                    xyxy = boxes[best_idx].xyxy[0].cpu().numpy()
+                    target_center = self.get_box_center(xyxy)
 
                 keep_indices = []
 
@@ -148,6 +183,10 @@ class YoloCompressedViewer(Node):
         self.update_detection_state(detected_now)
         self.publish_detect_state()
 
+        if self.is_detected and target_center is not None:
+            center_x, center_y = target_center
+            self.publish_detected_center(center_x, center_y)
+
         annotated_frame = result.plot()
 
         status_text = f"is_detected: {self.is_detected}"
@@ -160,6 +199,28 @@ class YoloCompressedViewer(Node):
             (0, 255, 0) if self.is_detected else (0, 0, 255),
             2
         )
+
+        if self.is_detected and target_center is not None:
+            center_x, center_y = target_center
+
+            cv2.circle(
+                annotated_frame,
+                (int(center_x), int(center_y)),
+                6,
+                (255, 0, 0),
+                -1
+            )
+
+            center_text = f"center: ({int(center_x)}, {int(center_y)})"
+            cv2.putText(
+                annotated_frame,
+                center_text,
+                (20, 80),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (255, 0, 0),
+                2
+            )
 
         cv2.imshow("TurtleBot4 YOLO Detection", annotated_frame)
 
