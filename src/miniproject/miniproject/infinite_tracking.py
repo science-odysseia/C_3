@@ -29,7 +29,8 @@ DISPLAY_PERIOD = 0.1
 
 LOST_DETECT_SECONDS = 1.0
 SEARCH_ANGULAR_SPEED = 0.3
-SEARCH_MAX_ROTATION = 2.0 * math.pi
+SEARCH_TURNS = 2.0
+SEARCH_MAX_ROTATION = SEARCH_TURNS * 2.0 * math.pi
 
 
 class CenterToNavGoal(Node):
@@ -239,7 +240,7 @@ class CenterToNavGoal(Node):
         self.cmd_vel_pub.publish(Twist())
 
         self.get_logger().warn(
-            'Follow mode: target not found after 360 degree search. '
+            f'Follow mode: target not found after {SEARCH_TURNS:.1f} turns search. '
             'Robot stopped and node will shutdown.'
         )
 
@@ -265,7 +266,7 @@ class CenterToNavGoal(Node):
 
             self.get_logger().info(
                 f'Follow mode: target lost over {LOST_DETECT_SECONDS:.1f}s. '
-                f'Start 360 degree search to {direction_text}.'
+                f'Start {SEARCH_TURNS:.1f} turns search to {direction_text}.'
             )
 
         elapsed_search = (now - self.search_start_time).nanoseconds / 1e9
@@ -281,7 +282,7 @@ class CenterToNavGoal(Node):
 
         self.get_logger().info(
             f'Follow mode searching... rotated approx '
-            f'{math.degrees(rotated_angle):.1f} / 360.0 deg'
+            f'{math.degrees(rotated_angle):.1f} / {math.degrees(SEARCH_MAX_ROTATION):.1f} deg'
         )
 
     def process_center(self):

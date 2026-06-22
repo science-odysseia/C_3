@@ -17,6 +17,10 @@ from turtlebot4_navigation.turtlebot4_navigator import (
 )
 
 
+STOP_PUBLISH_HZ = 20.0
+FORCE_STOP_SECONDS = 3.0
+
+
 class DetectionStopNode(Node):
 
     def __init__(self, navigator):
@@ -39,12 +43,19 @@ class DetectionStopNode(Node):
             10
         )
 
-    def stop_robot(self):
+    def publish_zero_cmd(self):
+        msg = Twist()
+        self.cmd_vel_pub.publish(msg)
+
+    def force_stop_robot(self, duration_sec=FORCE_STOP_SECONDS):
+        period = 1.0 / STOP_PUBLISH_HZ
+        repeat_count = int(duration_sec * STOP_PUBLISH_HZ)
+
         msg = Twist()
 
-        for _ in range(20):
+        for _ in range(repeat_count):
             self.cmd_vel_pub.publish(msg)
-            time.sleep(0.05)
+            time.sleep(period)
 
     def detected_callback(self, msg):
         if msg.data and not self.cancel_requested:
@@ -52,7 +63,7 @@ class DetectionStopNode(Node):
             self.detected = True
 
             self.get_logger().info(
-                'Vehicle detected. Cancelling navigation and stopping robot.'
+                'Vehicle detected. Cancelling navigation.'
             )
 
             try:
@@ -60,7 +71,7 @@ class DetectionStopNode(Node):
             except Exception as e:
                 self.get_logger().info(f'cancelTask failed: {e}')
 
-            self.stop_robot()
+            self.publish_zero_cmd()
 
 
 def wait_for_amcl_service():
@@ -123,24 +134,28 @@ def main():
     time.sleep(1.0)
 
     goal_pose = []
+
     goal_pose.append(
         navigator.getPoseStamped(
             [-1.724, 1.565],
             TurtleBot4Directions.SOUTH
         )
     )
+
     goal_pose.append(
         navigator.getPoseStamped(
             [-4.476, 1.565],
             TurtleBot4Directions.EAST
         )
     )
+
     goal_pose.append(
         navigator.getPoseStamped(
             [-4.476, -0.118],
             TurtleBot4Directions.NORTH
         )
     )
+
     goal_pose.append(
         navigator.getPoseStamped(
             [-3.169, -0.118],
@@ -160,11 +175,18 @@ def main():
     navigator.info('Following waypoints. Waiting for vehicle detection...')
 
     while rclpy.ok() and not stop_node.detected:
-        time.sleep(0.1)
+        time.sleep(0.05)
+
+    navigator.info('Vehicle detected. Forcing robot stop...')
+
+    try:
+        navigator.cancelTask()
+    except Exception as e:
+        navigator.info(f'cancelTask failed: {e}')
+
+    stop_node.force_stop_robot(FORCE_STOP_SECONDS)
 
     navigator.info('Navigation stop node finished. Shutting down this node.')
-
-    stop_node.stop_robot()
 
     stop_executor.shutdown()
     stop_thread.join(timeout=1.0)

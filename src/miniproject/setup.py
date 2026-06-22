@@ -37,6 +37,8 @@ setup(
             'temp_navgoal = miniproject.temp_navgoal:main',
             'depth_track_navgoal = miniproject.depth_track_navgoal:main',
             'white_percentage = miniproject.white_percentage:main',
+            'back_home = miniproject.back_home:main',
+            'finale = miniproject.finale:main',
         ],
     },
 )

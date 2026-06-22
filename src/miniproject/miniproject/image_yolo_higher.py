@@ -34,6 +34,13 @@ class YoloCompressedViewer(Node):
             10
         )
 
+        self.create_subscription(
+            Bool,
+            '/robot3/mission_finished',
+            self.finish_callback,
+            10
+        )
+
         self.detect_pub = self.create_publisher(
             Bool,
             '/robot3/is_detected',
@@ -55,6 +62,17 @@ class YoloCompressedViewer(Node):
         )
 
         self.get_logger().info("YOLO compressed image viewer started")
+
+    def finish_callback(self, msg):
+        if not msg.data:
+            return
+
+        self.get_logger().info(
+            'Mission finished received. Shutting down YOLO node.'
+        )
+
+        cv2.destroyAllWindows()
+        os.kill(os.getpid(), signal.SIGINT)
 
     def publish_detect_state(self):
         msg = Bool()
