@@ -15,7 +15,7 @@ def generate_launch_description():
 
     beep_node = Node(
         package='turtlebot4_beep',
-        executable='beep_node',
+        executable='beep_test',
         output='screen',
         emulate_tty=True
     )
@@ -29,7 +29,7 @@ def generate_launch_description():
 
     depth_node = Node(
         package='miniproject',
-        executable='depth_to_nav_goal',
+        executable='depth_track_navgoal',
         output='screen',
         emulate_tty=True
     )

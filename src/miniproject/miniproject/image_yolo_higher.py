@@ -16,7 +16,7 @@ from ultralytics import YOLO
 
 MY_CAR_CLASS_ID = 0
 WHITE_THRESHOLD = 180
-DETECT_SECONDS = 0.7
+DETECT_SECONDS = 0.5
 
 
 class YoloCompressedViewer(Node):

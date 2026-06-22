@@ -9,6 +9,7 @@ from rclpy.executors import SingleThreadedExecutor
 
 from std_msgs.msg import Bool
 from geometry_msgs.msg import Twist
+from lifecycle_msgs.srv import GetState
 
 from turtlebot4_navigation.turtlebot4_navigator import (
     TurtleBot4Directions,
@@ -46,9 +47,6 @@ class DetectionStopNode(Node):
             time.sleep(0.05)
 
     def detected_callback(self, msg):
-        # 로그가 너무 많이 뜨는 게 싫으면 이 줄은 나중에 지워도 됨
-        self.get_logger().info(f'/robot3/is_detected: {msg.data}')
-
         if msg.data and not self.cancel_requested:
             self.cancel_requested = True
             self.detected = True
@@ -65,8 +63,36 @@ class DetectionStopNode(Node):
             self.stop_robot()
 
 
+def wait_for_amcl_service():
+    wait_node = Node('wait_for_amcl_service_node')
+
+    client = wait_node.create_client(
+        GetState,
+        '/robot3/amcl/get_state'
+    )
+
+    wait_node.get_logger().info(
+        'Waiting for /robot3/amcl/get_state service...'
+    )
+
+    while rclpy.ok():
+        if client.wait_for_service(timeout_sec=1.0):
+            wait_node.get_logger().info(
+                '/robot3/amcl/get_state service is available.'
+            )
+            break
+
+        wait_node.get_logger().info(
+            '/robot3/amcl/get_state service not available, waiting...'
+        )
+
+    wait_node.destroy_node()
+
+
 def main():
     rclpy.init()
+
+    wait_for_amcl_service()
 
     navigator = TurtleBot4Navigator(namespace='robot3')
 
@@ -89,9 +115,12 @@ def main():
         [0.0, 0.0],
         TurtleBot4Directions.NORTH
     )
+
+    navigator.info('Setting initial pose...')
     navigator.setInitialPose(initial_pose)
 
-    navigator.waitUntilNav2Active()
+    navigator.info('Initial pose published. Continuing...')
+    time.sleep(1.0)
 
     goal_pose = []
     goal_pose.append(
@@ -119,8 +148,13 @@ def main():
         )
     )
 
+    navigator.info('Undocking...')
     navigator.undock()
 
+    navigator.info('Waiting after undock...')
+    time.sleep(0.5)
+
+    navigator.info('Starting waypoint navigation...')
     navigator.startFollowWaypoints(goal_pose)
 
     navigator.info('Following waypoints. Waiting for vehicle detection...')
