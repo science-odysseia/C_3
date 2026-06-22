@@ -29,7 +29,7 @@ def generate_launch_description():
 
     depth_node = Node(
         package='miniproject',
-        executable='depth_track_navgoal',
+        executable='infinite_tracking',
         output='screen',
         emulate_tty=True
     )

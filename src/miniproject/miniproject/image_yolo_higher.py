@@ -16,6 +16,7 @@ from ultralytics import YOLO
 
 MY_CAR_CLASS_ID = 0
 WHITE_THRESHOLD = 180
+MIN_WHITE_RATIO = 0.1
 DETECT_SECONDS = 0.5
 
 
@@ -139,14 +140,6 @@ class YoloCompressedViewer(Node):
                     my_car_indices.append(i)
 
             if len(my_car_indices) > 0:
-                detected_now = True
-
-            if len(my_car_indices) == 1:
-                target_idx = my_car_indices[0]
-                xyxy = boxes[target_idx].xyxy[0].cpu().numpy()
-                target_center = self.get_box_center(xyxy)
-
-            elif len(my_car_indices) >= 2:
                 best_idx = None
                 best_white_ratio = -1.0
 
@@ -154,31 +147,54 @@ class YoloCompressedViewer(Node):
                     xyxy = boxes[i].xyxy[0].cpu().numpy()
                     white_ratio = self.get_white_ratio(frame, xyxy)
 
+                    if white_ratio < MIN_WHITE_RATIO:
+                        continue
+
                     if white_ratio > best_white_ratio:
                         best_white_ratio = white_ratio
                         best_idx = i
 
                 if best_idx is not None:
+                    detected_now = True
+
                     xyxy = boxes[best_idx].xyxy[0].cpu().numpy()
                     target_center = self.get_box_center(xyxy)
 
-                keep_indices = []
+                    keep_indices = []
 
-                for i in range(len(boxes)):
-                    cls_id = int(boxes[i].cls[0])
+                    for i in range(len(boxes)):
+                        cls_id = int(boxes[i].cls[0])
 
-                    if cls_id == MY_CAR_CLASS_ID and i != best_idx:
-                        continue
+                        if cls_id == MY_CAR_CLASS_ID and i != best_idx:
+                            continue
 
-                    keep_indices.append(i)
+                        keep_indices.append(i)
 
-                keep_indices = torch.tensor(
-                    keep_indices,
-                    dtype=torch.long,
-                    device=boxes.data.device
-                )
+                    keep_indices = torch.tensor(
+                        keep_indices,
+                        dtype=torch.long,
+                        device=boxes.data.device
+                    )
 
-                result.boxes = boxes[keep_indices]
+                    result.boxes = boxes[keep_indices]
+                else:
+                    keep_indices = []
+
+                    for i in range(len(boxes)):
+                        cls_id = int(boxes[i].cls[0])
+
+                        if cls_id == MY_CAR_CLASS_ID:
+                            continue
+
+                        keep_indices.append(i)
+
+                    keep_indices = torch.tensor(
+                        keep_indices,
+                        dtype=torch.long,
+                        device=boxes.data.device
+                    )
+
+                    result.boxes = boxes[keep_indices]
 
         self.update_detection_state(detected_now)
         self.publish_detect_state()

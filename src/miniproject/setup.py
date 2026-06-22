@@ -33,9 +33,10 @@ setup(
             'nav_to_pose = miniproject.nav_to_pose:main',
             'follow_waypoints = miniproject.follow_waypoints:main',
             'follow_waypoints_stop = miniproject.follow_waypoints_stop:main',
-            'depth_to_nav_goal = miniproject.depth_to_nav_goal:main',
+            'infinite_tracking = miniproject.infinite_tracking:main',
             'temp_navgoal = miniproject.temp_navgoal:main',
             'depth_track_navgoal = miniproject.depth_track_navgoal:main',
+            'white_percentage = miniproject.white_percentage:main',
         ],
     },
 )

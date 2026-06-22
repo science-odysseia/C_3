@@ -22,7 +22,14 @@ import math
 
 
 ROBOT_NS = '/robot3'
-STOP_DISTANCE = 1.2   # m, 이 거리 이하가 되면 정지
+
+STOP_DISTANCE = 1.2
+PROCESS_PERIOD = 0.5
+DISPLAY_PERIOD = 0.1
+
+LOST_DETECT_SECONDS = 1.0
+SEARCH_ANGULAR_SPEED = 0.3
+SEARCH_MAX_ROTATION = 2.0 * math.pi
 
 
 class CenterToNavGoal(Node):
@@ -49,7 +56,15 @@ class CenterToNavGoal(Node):
 
         self.goal_sent = False
         self.stopped = False
+        self.follow_mode = False
         self.current_distance = None
+
+        self.last_detected_center = None
+        self.last_seen_time = None
+
+        self.searching = False
+        self.search_start_time = None
+        self.search_direction = 0.0
 
         self.logged_intrinsics = False
         self.logged_rgb_shape = False
@@ -85,8 +100,10 @@ class CenterToNavGoal(Node):
 
     def start_transform(self):
         self.get_logger().info('TF Tree 안정화 완료. 최초 goal 전송 및 거리 감시 시작.')
-        self.timer = self.create_timer(0.2, self.process_center)
-        self.display_timer = self.create_timer(0.1, self.update_display)
+
+        self.timer = self.create_timer(PROCESS_PERIOD, self.process_center)
+        self.display_timer = self.create_timer(DISPLAY_PERIOD, self.update_display)
+
         self.start_timer.cancel()
 
     def camera_info_callback(self, msg):
@@ -149,7 +166,54 @@ class CenterToNavGoal(Node):
     def center_callback(self, msg):
         with self.lock:
             if self.is_detected:
-                self.detected_center = (int(msg.x), int(msg.y))
+                center = (int(msg.x), int(msg.y))
+                self.detected_center = center
+
+                self.last_detected_center = center
+                self.last_seen_time = self.get_clock().now()
+
+                self.searching = False
+                self.search_start_time = None
+                self.search_direction = 0.0
+
+    def make_goal_from_center(self, x, y, z, frame_id, K):
+        fx, fy = K[0, 0], K[1, 1]
+        cx, cy = K[0, 2], K[1, 2]
+
+        X = (x - cx) * z / fx
+        Y = (y - cy) * z / fy
+        Z = z
+
+        pt_camera = PointStamped()
+        pt_camera.header.stamp = Time().to_msg()
+        pt_camera.header.frame_id = frame_id
+        pt_camera.point.x = X
+        pt_camera.point.y = Y
+        pt_camera.point.z = Z
+
+        pt_map = self.tf_buffer.transform(
+            pt_camera,
+            'map',
+            timeout=Duration(seconds=1.0)
+        )
+
+        goal_pose = PoseStamped()
+        goal_pose.header.frame_id = 'map'
+        goal_pose.header.stamp = self.get_clock().now().to_msg()
+
+        goal_pose.pose.position.x = pt_map.point.x
+        goal_pose.pose.position.y = pt_map.point.y
+        goal_pose.pose.position.z = 0.0
+
+        yaw = 0.0
+        goal_pose.pose.orientation = Quaternion(
+            x=0.0,
+            y=0.0,
+            z=math.sin(yaw / 2.0),
+            w=math.cos(yaw / 2.0)
+        )
+
+        return goal_pose, pt_map
 
     def stop_robot(self):
         try:
@@ -157,29 +221,118 @@ class CenterToNavGoal(Node):
         except Exception as e:
             self.get_logger().warn(f'cancelTask failed: {e}')
 
-        stop_msg = Twist()
-        self.cmd_vel_pub.publish(stop_msg)
+        self.cmd_vel_pub.publish(Twist())
 
         self.stopped = True
-        self.get_logger().info('Stop distance reached. Navigation cancelled and robot stopped.')
+        self.follow_mode = True
+
+        self.get_logger().info(
+            'Stop distance reached. Navigation cancelled and robot stopped. Follow mode enabled.'
+        )
+
+    def shutdown_after_search_fail(self):
+        try:
+            self.navigator.cancelTask()
+        except Exception as e:
+            self.get_logger().warn(f'Search fail cancelTask failed: {e}')
+
+        self.cmd_vel_pub.publish(Twist())
+
+        self.get_logger().warn(
+            'Follow mode: target not found after 360 degree search. '
+            'Robot stopped and node will shutdown.'
+        )
+
+        self.gui_thread_stop.set()
+        rclpy.shutdown()
+
+    def search_by_last_center(self, last_center, image_width):
+        now = self.get_clock().now()
+
+        if not self.searching:
+            last_x, _ = last_center
+            image_center_x = image_width / 2.0
+
+            if last_x < image_center_x:
+                self.search_direction = 1.0
+                direction_text = 'LEFT'
+            else:
+                self.search_direction = -1.0
+                direction_text = 'RIGHT'
+
+            self.search_start_time = now
+            self.searching = True
+
+            self.get_logger().info(
+                f'Follow mode: target lost over {LOST_DETECT_SECONDS:.1f}s. '
+                f'Start 360 degree search to {direction_text}.'
+            )
+
+        elapsed_search = (now - self.search_start_time).nanoseconds / 1e9
+        rotated_angle = elapsed_search * abs(SEARCH_ANGULAR_SPEED)
+
+        if rotated_angle >= SEARCH_MAX_ROTATION:
+            self.shutdown_after_search_fail()
+            return
+
+        msg = Twist()
+        msg.angular.z = self.search_direction * SEARCH_ANGULAR_SPEED
+        self.cmd_vel_pub.publish(msg)
+
+        self.get_logger().info(
+            f'Follow mode searching... rotated approx '
+            f'{math.degrees(rotated_angle):.1f} / 360.0 deg'
+        )
 
     def process_center(self):
         with self.lock:
             depth = self.depth_image.copy() if self.depth_image is not None else None
+            rgb = self.rgb_image.copy() if self.rgb_image is not None else None
             center = self.detected_center
+            last_center = self.last_detected_center
+            last_seen_time = self.last_seen_time
             frame_id = self.camera_frame
             K = self.K.copy() if self.K is not None else None
             is_detected = self.is_detected
-
-        if self.stopped:
-            self.cmd_vel_pub.publish(Twist())
-            return
+            follow_mode = self.follow_mode
 
         if not is_detected or center is None:
+            if follow_mode:
+                if last_center is not None and last_seen_time is not None:
+                    elapsed_lost = (
+                        self.get_clock().now() - last_seen_time
+                    ).nanoseconds / 1e9
+
+                    if elapsed_lost >= LOST_DETECT_SECONDS:
+                        if rgb is not None:
+                            image_width = rgb.shape[1]
+                        elif depth is not None:
+                            image_width = depth.shape[1]
+                        else:
+                            return
+
+                        self.search_by_last_center(last_center, image_width)
+                        return
+
+                self.cmd_vel_pub.publish(Twist())
+
+            elif self.stopped:
+                self.cmd_vel_pub.publish(Twist())
+
             return
 
         if depth is None or frame_id is None or K is None:
             return
+
+        if self.searching:
+            self.cmd_vel_pub.publish(Twist())
+            self.searching = False
+            self.search_start_time = None
+            self.search_direction = 0.0
+
+            self.get_logger().info(
+                'Target detected again. Stop searching and resume follow mode.'
+            )
 
         x, y = center
         h, w = depth.shape[:2]
@@ -192,16 +345,51 @@ class CenterToNavGoal(Node):
 
         with self.lock:
             self.current_distance = z
+            self.last_detected_center = center
+            self.last_seen_time = self.get_clock().now()
 
-        # 추가
-        self.get_logger().info(
-            f'Current distance: {z:.2f} m'
-        )
+        self.get_logger().info(f'Current distance: {z:.2f} m')
 
         if not (0.2 < z < 5.0):
             self.get_logger().warn(
                 f'Invalid depth value at center: {z:.2f} m'
             )
+            return
+
+        if self.follow_mode:
+            if z <= STOP_DISTANCE:
+                try:
+                    self.navigator.cancelTask()
+                except Exception as e:
+                    self.get_logger().warn(f'Follow mode cancelTask failed: {e}')
+
+                self.cmd_vel_pub.publish(Twist())
+                self.stopped = True
+
+                self.get_logger().info(
+                    f'Follow mode: target within {STOP_DISTANCE:.2f} m. '
+                    f'Navigation cancelled. Holding stop. distance={z:.2f} m'
+                )
+                return
+
+            try:
+                goal_pose, pt_map = self.make_goal_from_center(
+                    x, y, z, frame_id, K
+                )
+
+                self.navigator.goToPose(goal_pose)
+
+                self.stopped = False
+
+                self.get_logger().info(
+                    f'Follow mode: updated goal from center ({x}, {y}) -> '
+                    f'map ({pt_map.point.x:.2f}, {pt_map.point.y:.2f}), '
+                    f'distance={z:.2f} m'
+                )
+
+            except Exception as e:
+                self.get_logger().warn(f'Follow mode TF or goal error: {e}')
+
             return
 
         if z <= STOP_DISTANCE:
@@ -212,40 +400,8 @@ class CenterToNavGoal(Node):
             return
 
         try:
-            fx, fy = K[0, 0], K[1, 1]
-            cx, cy = K[0, 2], K[1, 2]
-
-            X = (x - cx) * z / fx
-            Y = (y - cy) * z / fy
-            Z = z
-
-            pt_camera = PointStamped()
-            pt_camera.header.stamp = Time().to_msg()
-            pt_camera.header.frame_id = frame_id
-            pt_camera.point.x = X
-            pt_camera.point.y = Y
-            pt_camera.point.z = Z
-
-            pt_map = self.tf_buffer.transform(
-                pt_camera,
-                'map',
-                timeout=Duration(seconds=1.0)
-            )
-
-            goal_pose = PoseStamped()
-            goal_pose.header.frame_id = 'map'
-            goal_pose.header.stamp = self.get_clock().now().to_msg()
-
-            goal_pose.pose.position.x = pt_map.point.x
-            goal_pose.pose.position.y = pt_map.point.y
-            goal_pose.pose.position.z = 0.0
-
-            yaw = 0.0
-            goal_pose.pose.orientation = Quaternion(
-                x=0.0,
-                y=0.0,
-                z=math.sin(yaw / 2.0),
-                w=math.cos(yaw / 2.0)
+            goal_pose, pt_map = self.make_goal_from_center(
+                x, y, z, frame_id, K
             )
 
             self.navigator.goToPose(goal_pose)
@@ -269,6 +425,8 @@ class CenterToNavGoal(Node):
             distance = self.current_distance
             goal_sent = self.goal_sent
             stopped = self.stopped
+            follow_mode = self.follow_mode
+            searching = self.searching
 
         if rgb is None or depth is None:
             return
@@ -288,7 +446,11 @@ class CenterToNavGoal(Node):
             cv2.COLOR_GRAY2BGR
         )
 
-        status = f'goal_sent: {goal_sent}, stopped: {stopped}'
+        status = (
+            f'goal_sent: {goal_sent}, stopped: {stopped}, '
+            f'follow: {follow_mode}, search: {searching}'
+        )
+
         cv2.putText(
             rgb_display,
             status,
