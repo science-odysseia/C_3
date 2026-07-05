@@ -1,0 +1,48 @@
+# === Clone TurtleBot4 and related packages ===
+cd ~/turtlebot4_ws/src
+git clone https://github.com/turtlebot/turtlebot4.git -b humble
+git clone https://github.com/turtlebot/turtlebot4_simulator.git -b humble
+git clone https://github.com/turtlebot/turtlebot4_desktop.git -b humble
+git clone https://github.com/turtlebot/turtlebot4_tutorials.git
+git clone https://github.com/robo-friends/m-explore-ros2.git
+
+
+# === Install dependencies with rosdep ===
+cd ~/turtlebot4_ws
+
+# Initialize rosdep if not already initialized
+if [ ! -f /etc/ros/rosdep/sources.list.d/20-default.list ]; then
+    sudo rosdep init
+fi
+
+# Update rosdep and install dependencies
+rosdep update
+
+
+cd ~/turtlebot4_ws
+rosdep install --from-path src -yi --rosdistro humble
+
+
+gazebo설치(필수아님)
+
+# === Install Gazebo and ROS-Ignition bridge ===
+
+# Install wget if not already installed
+sudo apt-get update && sudo apt-get install -y wget
+
+# Install ROS-Ignition bridge for Humble
+sudo apt install -y ros-humble-ros-ign
+
+# Confirm installation of ros_ign packages
+ros2 pkg list | grep ros_ign
+
+# Add OSRF’s Gazebo (Ignition) repository
+sudo sh -c 'echo "deb http://packages.osrfoundation.org/gazebo/ubuntu-stable $(lsb_release -cs) main" > /etc/apt/sources.list.d/gazebo-stable.list'
+
+# Import the OSRF public key
+wget http://packages.osrfoundation.org/gazebo.key -O - | sudo apt-key add -
+
+# Update apt cache and install Ignition Fortress
+sudo apt-get update && sudo apt-get install -y ignition-fortress
+
+
