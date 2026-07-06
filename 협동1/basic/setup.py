@@ -33,6 +33,7 @@ setup(
             'rotation_async = basic.rotation_async:main',
             'rotation_canceling = basic.rotation_canceling:main',
             'mix_force_rotate = basic.mix_force_rotate:main',
+            'button = basic.button:main',
         ],
     },
 )
