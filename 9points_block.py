@@ -1,6 +1,9 @@
 import rclpy
 import DR_init
+import json
+
 from copy import deepcopy
+from std_msgs.msg import String
 
 # =========================================================================
 # [1. 로봇 및 환경 설정 환경 상수]
@@ -37,6 +40,19 @@ def main(args=None):
     except ImportError as e:
         node.get_logger().info(f"Error importing DSR_ROBOT2 : {e}")
         return
+
+    # # 2-1. WEB에서 보내는 json 리스트 수신
+    # received_blocks = []   # 수신 결과 저장용 (리스트로 감싸서 클로저에서 수정 가능하게)
+
+    # def centers_callback(msg):
+    #     try:
+    #         blocks_raw_list = json.loads(msg.data)
+    #         received_blocks.append(blocks_raw_list)
+    #         node.get_logger().info(f"블록 리스트 수신: {blocks_raw_list}")
+    #     except Exception as e:
+    #         node.get_logger().error(f"데이터 파싱 실패: {e}")
+
+    # node.create_subscription(String, 'centers', centers_callback, 10)
 
     # =========================================================================
     # [3. 그리퍼 서브 루틴]
@@ -94,7 +110,7 @@ def main(args=None):
     LEGO_W_Z = 19.0
 
     # =========================================================================
-    # [4-1. 9점 티칭 기반 2차(Biquadratic) 보간 캘리브레이션]
+    # [4-1. 9점 티칭 기반 2차(Biquadratic) 보간 캘리브레이션 -- 기본 자세용]
     # =========================================================================
     # 티칭펜던트에서 실측한 9점 (102번 좌표계 기준 x, y, z)
     # 각 점의 "명목 위치"는 원점에서 ±144mm (= 9칸 x 16mm) 지점.
@@ -174,7 +190,35 @@ def main(args=None):
         return px, py, pz
 
     # =========================================================================
-    # [4-2. 배치 이력 기반 충돌 회피 자세 결정]
+    # [4-2. 90도 회전 자세 place 전용 보정]
+    # =========================================================================
+    # 블록을 문 상태 + 90도 회전 자세로 x라인 19점을 실측 티칭한 데이터에서
+    # 최소제곱으로 도출한 계통 보정값.
+    # - 회전 자세로 물면 그리퍼-블록 편심 때문에 TCP가 x/y로 약 +1.5mm씩 밀림
+    # - z는 x 위치에 따라 선형으로 기울어짐 (라인 전체에 걸쳐 약 6.6mm 변화)
+    #   (19점 z 실측값의 1차 근사: z = ROT_Z0 + ROT_Z_SLOPE * x, 잔차 RMS 1.15mm)
+    ROT_DX = 1.50            # 회전 자세 x 오프셋 (mm)
+    ROT_DY = 1.56            # 회전 자세 y 오프셋 (mm)
+    ROT_Z0 = -9.76           # 회전 자세 z(x) 근사 절편
+    ROT_Z_SLOPE = -0.02293   # 회전 자세 z(x) 근사 기울기
+
+    def apply_rotated_correction(px, py, grid_z):
+        """
+        회전 자세 place용 좌표 보정.
+        x, y : 9점 보간 결과에 회전 편심 오프셋을 더함
+        z    : 19점 라인 실측 기반 z(x) 근사값 사용
+               (블록을 문 상태에서 안착 완료된 TCP 높이 그 자체)
+               + 층 높이 반영 (102 z축이 아래 방향이므로 위층 = -z)
+        ※ 주의: 19점은 y≈0 라인에서만 딴 데이터라 z의 y 의존성은 미반영.
+          y가 크게 다른 위치의 회전 place에서 오차가 보이면 y라인 추가 티칭 필요.
+        """
+        cx = px + ROT_DX
+        cy = py + ROT_DY
+        cz = (ROT_Z0 + ROT_Z_SLOPE * px) - grid_z * LEGO_W_Z
+        return cx, cy, cz
+
+    # =========================================================================
+    # [4-3. 배치 이력 기반 충돌 회피 자세 결정]
     # =========================================================================
     # 조립 완료된 블록의 grid 좌표를 기억하는 리스트
     placed_blocks = []  # [(grid_x, grid_y, grid_z), ...]
@@ -191,6 +235,8 @@ def main(args=None):
         - 90도 회전 자세: 손가락이 y축 방향으로 벌어짐
           -> y방향 이웃(±2 grid)에 블록이 있으면 충돌 위험
         같은 층(grid_z)의 이웃만 검사 (아래층 블록은 손가락과 부딪히지 않음).
+
+        반환값: (a, b, c, is_rotated)
         """
         x_neighbor = is_occupied(grid_x + 2, grid_y, grid_z) or \
                      is_occupied(grid_x - 2, grid_y, grid_z)
@@ -200,16 +246,16 @@ def main(args=None):
 
         if not x_neighbor:
             node.get_logger().info("자세 판단: 기본 자세로 place (x방향 이웃 없음)")
-            return FIXED_A, FIXED_B, FIXED_C
+            return FIXED_A, FIXED_B, FIXED_C, False
         elif not y_neighbor:
             node.get_logger().info("자세 판단: 90도 회전 place (x방향 이웃 존재, y방향 비어있음)")
-            return FIXED_A, FIXED_B, FIXED_C + 90.0
+            return FIXED_A, FIXED_B, FIXED_C + 90.0, True
         else:
             node.get_logger().warn(
                 "경고: x/y 양방향 모두 인접 블록 존재! 충돌 위험이 있으니 "
                 "조립 순서를 조정하세요. (일단 기본 자세로 진행)"
             )
-            return FIXED_A, FIXED_B, FIXED_C
+            return FIXED_A, FIXED_B, FIXED_C, False
 
     # =========================================================================
     # [5. 큐(Queue) 데이터 준비 및 Z축 정렬]
@@ -218,16 +264,29 @@ def main(args=None):
     # 2x2 블록 타입을 의미하므로 모든 블록에서 항상 2로 고정된다.
     incoming_blocks = [
         [2, [0, 0, 0]],
-        [2, [0, 2, 0]],
-        [2, [0, -2, 0]],
         [2, [2, 0, 0]],
+        [2, [4, 0, 0]],
         [2, [-2, 0, 0]],
+        [2, [-4, 0, 0]],
         # [2, [0, 0, 1]],
         # [2, [2, 0, 1]],
         # [2, [-2, 0, 1]],
         # [2, [0, 2, 1]],
         # [2, [0, -2, 1]]
     ]
+
+    # 메시지 수신 받아서 리스트화 하기
+    # node.get_logger().info("웹 UI에서 centers 토픽 수신 대기 중...")
+    # while rclpy.ok() and not received_blocks:
+    #     rclpy.spin_once(node, timeout_sec=0.1)   # 콜백이 돌 수 있게 spin
+
+    # incoming_blocks = received_blocks[0]
+
+    # # x, y에 0.5씩 빼서 TCP 이동 좌표로 변환 (블록 중심 -> 조립 기준점 보정)
+    # incoming_blocks = [
+    #     [block_id, [x - 0.5, y - 0.5, z]]
+    #     for block_id, (x, y, z) in incoming_blocks
+    # ]
 
     # [핵심 로직] 각 요소의 block[1][2], 즉 z 좌표를 기준으로 오름차순 정렬 (큐 생성)
     lego_queue = sorted(incoming_blocks, key=lambda block: block[1][2])
@@ -262,12 +321,18 @@ def main(args=None):
 
             # --- [9점 보간] 격자 좌표 -> 102번 좌표계 기준 보정된 실좌표 ---
             calc_x, calc_y, calc_z = grid_to_pos(grid_x, grid_y, grid_z)
-            node.get_logger().info(
-                f"보간 결과 좌표(102 기준): x={calc_x:.2f}, y={calc_y:.2f}, z={calc_z:.2f}"
-            )
 
             # 배치 이력 기반으로 충돌 없는 place 자세 자동 선택
-            place_a, place_b, place_c = get_place_orientation(grid_x, grid_y, grid_z)
+            place_a, place_b, place_c, is_rotated = get_place_orientation(grid_x, grid_y, grid_z)
+
+            # --- [회전 보정] 90도 회전 place인 경우 19점 실측 기반 보정 적용 ---
+            if is_rotated:
+                calc_x, calc_y, calc_z = apply_rotated_correction(calc_x, calc_y, grid_z)
+                node.get_logger().info("회전 자세 보정 적용됨 (19점 라인 실측 기반)")
+
+            node.get_logger().info(
+                f"최종 목표 좌표(102 기준): x={calc_x:.2f}, y={calc_y:.2f}, z={calc_z:.2f}"
+            )
 
             # 최종 타겟 좌표 생성 (102번 좌표계 기준 값)
             posx1 = posx([calc_x, calc_y, calc_z, place_a, place_b, place_c])
@@ -292,7 +357,7 @@ def main(args=None):
             pose_place_ready[2] -= 110  # 조립 목표 상공 대기 위치 계산
 
             movel(pose_place_ready, vel=VELOCITY, acc=ACC)  # 상공 이동
-            movel(pose_place_soft, vel=150, acc=ACC)                  # 가안착 위치 하강
+            movel(pose_place_soft, vel=150, acc=ACC)        # 가안착 위치 하강 (표면 5mm 위)
 
             wait(0.1)
 
