@@ -10,7 +10,7 @@ from std_msgs.msg import String
 # =========================================================================
 ROBOT_ID = "dsr01"
 ROBOT_MODEL = "m0609"
-VELOCITY, ACC = 100, 100
+VELOCITY, ACC = 600, 600
 
 DR_init.__dsr__id = ROBOT_ID
 DR_init.__dsr__model = ROBOT_MODEL
