@@ -329,6 +329,7 @@ def main(args=None):
 
     try:
         for current_block in lego_queue:
+            DEFAULT_POSE_Z_OFFSET = -6.0
             block_type = current_block[0]
             grid_x, grid_y, grid_z = current_block[1]
 
@@ -347,7 +348,8 @@ def main(args=None):
                 calc_x, calc_y, calc_z = apply_rotated_correction(
                     calc_x, calc_y, grid_x, grid_y, grid_z)
                 node.get_logger().info("회전 자세 보정 적용됨 (19점 룩업 테이블)")
-
+            else:
+                calc_z += DEFAULT_POSE_Z_OFFSET
             node.get_logger().info(
                 f"최종 목표 좌표(102 기준): x={calc_x:.2f}, y={calc_y:.2f}, z={calc_z:.2f}"
             )
