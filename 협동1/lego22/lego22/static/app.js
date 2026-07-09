@@ -448,6 +448,12 @@ function handleCanvasClick(evt) {
 
 canvas.addEventListener('pointerdown', (evt) => {
   console.log('[lego-cad] canvas pointerdown, button =', evt.button, 'pointerType =', evt.pointerType);
+  // 좌표 입력창 등에 포커스가 남아 있으면 해제 -> 3D 화면 클릭 후 단축키가 바로 동작하도록
+  const ae = document.activeElement;
+  if (ae && typeof ae.blur === 'function' &&
+      (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT')) {
+    ae.blur();
+  }
   if (evt.button !== 0) return; // 좌클릭만 처리 (0=좌, 1=휠, 2=우)
   try {
     handleCanvasClick(evt);
@@ -520,11 +526,28 @@ document.getElementById('btn-rotate').addEventListener('click', () => {
 
 document.getElementById('btn-add').addEventListener('click', () => {
   const x = numVal('input-x'), y = numVal('input-y'), z = numVal('input-z');
-  addBlock(x, y, z);
+  if (addBlock(x, y, z)) {
+    // 블록을 놓으면 예상 블록을 방금 놓은 블록 바로 위(z+1)로 이동
+    updatePreview(x, y, z + 1, '예상 블록 위로 이동');
+    setInputs(x, y, z + 1);
+  }
 });
 
 document.getElementById('btn-delete-at').addEventListener('click', deleteBlockAtInput);
 document.getElementById('btn-delete-last').addEventListener('click', deleteLastBlock);
+
+const btnClearAll = document.getElementById('btn-clear-all');
+if (btnClearAll) btnClearAll.addEventListener('click', async () => {
+  const n = state.blockOrder.length;
+  if (n === 0) {
+    setStatus('삭제할 블록이 없습니다', 'bad');
+    return;
+  }
+  const ok = await showConfirmDialog(`블록 ${n}개를 모두 삭제하고 맵을 초기화할까요?`, '초기화');
+  if (!ok) return;
+  clearAllBlocks();
+  setStatus(`맵 초기화 완료: 블록 ${n}개 삭제`, 'ok');
+});
 
 document.getElementById('btn-export').addEventListener('click', async () => {
   // [블록타입 번호, [cx, cy, cz]] 리스트 생성
@@ -632,6 +655,7 @@ function captureThumbnail() {
 // ----- 페이지 내장 대화상자 (window.prompt/confirm 은 환경에 따라 차단될 수 있음) -----
 function makeDialogOverlay() {
   const overlay = document.createElement('div');
+  overlay.dataset.dialog = '1'; // 모달 열림 감지용 (단축키 비활성화)
   overlay.style.cssText =
     'position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;' +
     'align-items:center;justify-content:center;z-index:1100;';
@@ -812,6 +836,7 @@ function showLoadModal(maps) {
   closeLoadModal();
 
   const overlay = document.createElement('div');
+  overlay.dataset.dialog = '1'; // 모달 열림 감지용 (단축키 비활성화)
   overlay.style.cssText =
     'position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;' +
     'align-items:center;justify-content:center;z-index:1000;';
@@ -1027,3 +1052,230 @@ async function refreshGallery() {
 }
 
 refreshGallery();
+
+// ---------------- 단축키 (기어 버튼 / 키 바인딩) ----------------
+const KEYBIND_STORAGE_KEY = 'lego22_keybinds_v1';
+
+const KEYBIND_ACTIONS = [
+  { id: 'undo',      label: '되돌리기 (마지막 블록 삭제)' },
+  { id: 'place',     label: '예상 블록 위치에 블록 놓기' },
+  { id: 'moveUp',    label: '예상 블록 이동: +Y' },
+  { id: 'moveDown',  label: '예상 블록 이동: -Y' },
+  { id: 'moveLeft',  label: '예상 블록 이동: -X' },
+  { id: 'moveRight', label: '예상 블록 이동: +X' },
+  { id: 'moveZUp',   label: '예상 블록 이동: +Z (위)' },
+  { id: 'moveZDown', label: '예상 블록 이동: -Z (아래)' },
+];
+
+const DEFAULT_KEYBINDS = {
+  undo:      { code: 'KeyZ',       ctrl: true,  shift: false, alt: false },
+  place:     { code: 'Enter',      ctrl: false, shift: false, alt: false },
+  moveUp:    { code: 'ArrowUp',    ctrl: false, shift: false, alt: false },
+  moveDown:  { code: 'ArrowDown',  ctrl: false, shift: false, alt: false },
+  moveLeft:  { code: 'ArrowLeft',  ctrl: false, shift: false, alt: false },
+  moveRight: { code: 'ArrowRight', ctrl: false, shift: false, alt: false },
+  moveZUp:   { code: 'KeyW',       ctrl: false, shift: false, alt: false },
+  moveZDown: { code: 'KeyS',       ctrl: false, shift: false, alt: false },
+};
+
+function loadKeybinds() {
+  try {
+    const raw = localStorage.getItem(KEYBIND_STORAGE_KEY);
+    if (raw) {
+      const saved = JSON.parse(raw);
+      const out = {};
+      for (const a of KEYBIND_ACTIONS) {
+        const b = saved[a.id];
+        out[a.id] = (b && typeof b.code === 'string')
+          ? { code: b.code, ctrl: !!b.ctrl, shift: !!b.shift, alt: !!b.alt }
+          : { ...DEFAULT_KEYBINDS[a.id] };
+      }
+      return out;
+    }
+  } catch (e) { /* localStorage 사용 불가 환경이면 기본값 사용 */ }
+  return JSON.parse(JSON.stringify(DEFAULT_KEYBINDS));
+}
+
+function saveKeybinds() {
+  try { localStorage.setItem(KEYBIND_STORAGE_KEY, JSON.stringify(keybinds)); } catch (e) { /* 무시 */ }
+}
+
+let keybinds = loadKeybinds();
+let kbCapturingAction = null; // 지금 키 입력을 기다리는 액션 id
+
+function codeLabel(code) {
+  if (code.startsWith('Key')) return code.slice(3);
+  if (code.startsWith('Digit')) return code.slice(5);
+  if (code.startsWith('Numpad')) return 'Num' + code.slice(6);
+  const map = { ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→', Space: 'Space' };
+  return map[code] || code;
+}
+
+function keybindText(b) {
+  const parts = [];
+  if (b.ctrl) parts.push('Ctrl');
+  if (b.alt) parts.push('Alt');
+  if (b.shift) parts.push('Shift');
+  parts.push(codeLabel(b.code));
+  return parts.join(' + ');
+}
+
+function matchKeybind(e, b) {
+  return e.code === b.code &&
+         e.ctrlKey === !!b.ctrl &&
+         e.shiftKey === !!b.shift &&
+         e.altKey === !!b.alt;
+}
+
+// ----- 단축키 동작 -----
+function moveGhost(dx, dy, dz) {
+  dz = dz || 0;
+  // 예상 블록이 없으면 현재 좌표 입력값을 시작점으로 사용
+  const sel = state.selectedCell ||
+    { x: numVal('input-x'), y: numVal('input-y'), z: numVal('input-z') };
+  const nx = Math.max(-10, Math.min(10, sel.x + dx));
+  const ny = Math.max(-10, Math.min(10, sel.y + dy));
+  const nz = Math.max(0, Math.min(20, sel.z + dz));
+  updatePreview(nx, ny, nz, '예상 블록 이동');
+  setInputs(nx, ny, nz);
+}
+
+function placeAtGhost() {
+  const sel = state.selectedCell;
+  if (!sel) {
+    setStatus('예상 블록이 없습니다. 칸을 클릭하거나 방향키로 위치를 지정하세요.', 'bad');
+    return;
+  }
+  if (addBlock(sel.x, sel.y, sel.z)) {
+    // 놓은 블록 바로 위(z+1)로 예상 블록 이동
+    updatePreview(sel.x, sel.y, sel.z + 1, '예상 블록 위로 이동');
+    setInputs(sel.x, sel.y, sel.z + 1);
+  }
+}
+
+// ----- 설정 모달 -----
+const keybindOverlay = document.getElementById('keybind-overlay');
+const keybindListEl = document.getElementById('keybind-list');
+const btnKeybindEl = document.getElementById('btn-keybind');
+const kbUiReady = !!(keybindOverlay && keybindListEl && btnKeybindEl);
+if (!kbUiReady) {
+  console.warn('[lego-cad] 단축키 UI 요소를 찾지 못했습니다. index.html이 예전 버전(캐시)일 수 있습니다. 단축키 설정 창 없이 기본 단축키만 동작합니다.');
+}
+
+function renderKeybindList() {
+  if (!kbUiReady) return;
+  keybindListEl.innerHTML = '';
+  for (const a of KEYBIND_ACTIONS) {
+    const row = document.createElement('div');
+    row.className = 'kb-row';
+
+    const label = document.createElement('label');
+    label.textContent = a.label;
+
+    const btn = document.createElement('button');
+    btn.className = 'kb-key';
+    if (kbCapturingAction === a.id) {
+      btn.classList.add('capturing');
+      btn.textContent = '키 입력 대기중...';
+    } else {
+      btn.textContent = keybindText(keybinds[a.id]);
+    }
+    btn.addEventListener('click', () => {
+      kbCapturingAction = (kbCapturingAction === a.id) ? null : a.id;
+      renderKeybindList();
+    });
+
+    row.appendChild(label);
+    row.appendChild(btn);
+    keybindListEl.appendChild(row);
+  }
+}
+
+if (kbUiReady) {
+  btnKeybindEl.addEventListener('click', () => {
+    kbCapturingAction = null;
+    renderKeybindList();
+    keybindOverlay.hidden = false;
+  });
+  const kbClose = document.getElementById('kb-close');
+  const kbReset = document.getElementById('kb-reset');
+  if (kbClose) kbClose.addEventListener('click', () => {
+    kbCapturingAction = null;
+    keybindOverlay.hidden = true;
+  });
+  if (kbReset) kbReset.addEventListener('click', () => {
+    keybinds = JSON.parse(JSON.stringify(DEFAULT_KEYBINDS));
+    saveKeybinds();
+    kbCapturingAction = null;
+    renderKeybindList();
+  });
+  keybindOverlay.addEventListener('click', (e) => {
+    if (e.target === keybindOverlay) {
+      kbCapturingAction = null;
+      keybindOverlay.hidden = true;
+    }
+  });
+}
+
+// ----- 전역 keydown 처리 -----
+const MODIFIER_CODES = new Set([
+  'ControlLeft', 'ControlRight', 'ShiftLeft', 'ShiftRight',
+  'AltLeft', 'AltRight', 'MetaLeft', 'MetaRight',
+]);
+
+document.addEventListener('keydown', (e) => {
+  try {
+  // 1) 단축키 변경(캡처) 모드
+  if (kbCapturingAction) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.key === 'Escape') { // 변경 취소
+      kbCapturingAction = null;
+      renderKeybindList();
+      return;
+    }
+    if (MODIFIER_CODES.has(e.code)) return; // 수식키 단독 입력은 대기 유지
+
+    const newBind = { code: e.code, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey };
+    // 다른 액션에 같은 키가 이미 있으면 그쪽을 기본값으로 되돌려 충돌 방지
+    for (const a of KEYBIND_ACTIONS) {
+      if (a.id !== kbCapturingAction && matchKeybind(
+            { code: newBind.code, ctrlKey: newBind.ctrl, shiftKey: newBind.shift, altKey: newBind.alt },
+            keybinds[a.id])) {
+        keybinds[a.id] = { ...DEFAULT_KEYBINDS[a.id] };
+      }
+    }
+    keybinds[kbCapturingAction] = newBind;
+    kbCapturingAction = null;
+    saveKeybinds();
+    renderKeybindList();
+    return;
+  }
+
+  // 2) 단축키 설정 모달이 열려 있으면 ESC로 닫기만 허용
+  if (keybindOverlay && !keybindOverlay.hidden) {
+    if (e.key === 'Escape') {
+      kbCapturingAction = null;
+      keybindOverlay.hidden = true;
+    }
+    return;
+  }
+
+  // 3) 입력창에 포커스가 있거나 저장/불러오기 모달이 열려 있으면 단축키 무시
+  const tag = (document.activeElement && document.activeElement.tagName) || '';
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  if (document.querySelector('[data-dialog]')) return;
+
+  // 4) 단축키 실행
+  if (matchKeybind(e, keybinds.undo))           { e.preventDefault(); deleteLastBlock(); }
+  else if (matchKeybind(e, keybinds.place))     { e.preventDefault(); placeAtGhost(); }
+  else if (matchKeybind(e, keybinds.moveUp))    { e.preventDefault(); moveGhost(0, +1); }
+  else if (matchKeybind(e, keybinds.moveDown))  { e.preventDefault(); moveGhost(0, -1); }
+  else if (matchKeybind(e, keybinds.moveLeft))  { e.preventDefault(); moveGhost(-1, 0); }
+  else if (matchKeybind(e, keybinds.moveRight)) { e.preventDefault(); moveGhost(+1, 0); }
+  else if (matchKeybind(e, keybinds.moveZUp))   { e.preventDefault(); moveGhost(0, 0, +1); }
+  else if (matchKeybind(e, keybinds.moveZDown)) { e.preventDefault(); moveGhost(0, 0, -1); }
+  } catch (err) {
+    console.error('[lego-cad] 단축키 처리 오류:', err);
+  }
+});
