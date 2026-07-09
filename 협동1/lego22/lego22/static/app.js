@@ -320,8 +320,15 @@ function deleteLastBlock() {
     return;
   }
   const key = state.blockOrder[state.blockOrder.length - 1];
+  const b = state.blocks.get(key);
   removeBlock(key);
-  setStatus(`삭제: ${key}`, 'ok');
+  if (b) {
+    // 삭제한 블록 자리로 예상 블록 이동 -> 엔터로 다시 놓기(redo)도 가능
+    updatePreview(b.x, b.y, b.z, '되돌리기');
+    setInputs(b.x, b.y, b.z);
+  } else {
+    setStatus(`삭제: ${key}`, 'ok');
+  }
 }
 
 // ---------------- 미리보기 / 선택 ----------------
