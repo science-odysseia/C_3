@@ -228,10 +228,18 @@ def bind_server_with_retry(host, start_port, handler_cls, logger, max_tries=10):
         except OSError as e:
             last_err = e
             if getattr(e, 'errno', None) == 98:  # Address already in use
-                logger.warn(f"포트 {port} 이(가) 이미 사용 중입니다. 다음 포트로 재시도합니다...")
+                if offset < max_tries - 1:
+                    logger.warn(f"포트 {port} 이(가) 이미 사용 중입니다. 다음 포트로 재시도합니다...")
                 continue
             raise
 
+    if max_tries == 1:
+        raise RuntimeError(
+            f"포트 {start_port} 이(가) 이미 사용 중이라 서버를 시작할 수 없습니다 "
+            f"(마지막 오류: {last_err}). "
+            f"해당 포트를 쓰는 프로세스를 종료한 뒤 다시 실행해 주세요. "
+            f"(확인: 'lsof -i :{start_port}' 또는 'fuser -k {start_port}/tcp')"
+        )
     raise RuntimeError(
         f"{start_port}번부터 {start_port + max_tries - 1}번까지 포트를 모두 사용할 수 없습니다 "
         f"(마지막 오류: {last_err}). "
@@ -262,8 +270,9 @@ class LegoCadWebServerNode(Node):
             self.save_map, self.load_map, self.list_maps,
             self.get_thumb, self.delete_map, self.get_logger()
         )
+        # 8080이 사용 중이면 8081, 8082 ... 순으로 다음 포트를 자동으로 시도한다
         self.httpd, self.port = bind_server_with_retry(
-            self.host, requested_port, handler_cls, self.get_logger()
+            self.host, requested_port, handler_cls, self.get_logger(), max_tries=10
         )
 
         self.get_logger().info(f"정적 파일 경로: {self.static_dir}")
@@ -436,6 +445,32 @@ def main(args=None):
 
     server_thread = threading.Thread(target=node.serve_forever, daemon=True)
     server_thread.start()
+
+    # 브라우저 자동 오픈 (localhost:<실제 바인딩된 포트>)
+    url = f'http://localhost:{node.port}'
+    opened = False
+    try:
+        import webbrowser
+        opened = bool(webbrowser.open(url))
+    except Exception:
+        opened = False
+    if not opened:
+        # webbrowser 가 실패하는 환경(WSL, xdg 미설정 등)을 위한 폴백
+        import shutil
+        import subprocess
+        for cmd in (['xdg-open', url], ['wslview', url],
+                    ['cmd.exe', '/c', 'start', '', url], ['open', url]):
+            if shutil.which(cmd[0]):
+                try:
+                    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    opened = True
+                    break
+                except Exception:
+                    continue
+    if opened:
+        node.get_logger().info(f"브라우저를 자동으로 열었습니다 -> {url}")
+    else:
+        node.get_logger().warn(f"브라우저 자동 오픈에 실패했습니다. 직접 접속해 주세요 -> {url}")
 
     try:
         rclpy.spin(node)
