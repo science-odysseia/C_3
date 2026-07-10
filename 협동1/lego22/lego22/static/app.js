@@ -577,6 +577,18 @@ document.getElementById('btn-export').addEventListener('click', async () => {
 
   if (printState.active) return; // 이미 출력 중이면 무시
 
+  // [중요] 발행 "전에" 진행 seq 기준점을 먼저 찍는다.
+  // 발행 후에 찍으면, 로봇이 곧바로 보낸 첫 블록 메시지가 기준점 안에 포함되어
+  // 버려지는 경합이 생김 (첫 블록이 안 깜빡이고 한 단계 밀려 보이는 원인)
+  let baselineSeq = 0;
+  try {
+    const pre = await fetch('/api/progress?after=999999999');
+    const pj = await pre.json();
+    baselineSeq = (pj && pj.latest) || 0;
+  } catch (e) {
+    baselineSeq = 0;
+  }
+
   try {
     const res = await fetch('/api/publish_centers', {
       method: 'POST',
@@ -586,7 +598,7 @@ document.getElementById('btn-export').addEventListener('click', async () => {
     const json = await res.json();
     if (json.ok) {
       setStatus(`발행 완료 (${centers.length}개 블록)`, 'ok');
-      startPrintMode(); // 출력(조립) 진행 표시 모드 진입
+      startPrintMode(baselineSeq); // 출력(조립) 진행 표시 모드 진입
     } else {
       setStatus(`발행 실패: ${json.error}`, 'bad');
     }
@@ -1349,7 +1361,7 @@ function findBlockByAnchor(ax, ay, az) {
   return null;
 }
 
-async function startPrintMode() {
+async function startPrintMode(baselineSeq) {
   // 이번에 로봇이 새로 조립할 블록 = 아직 출력된 적 없는 블록
   const pendingKeys = [...state.blocks.keys()].filter((k) => !printedKeys.has(k));
   if (pendingKeys.length === 0) {
@@ -1375,14 +1387,8 @@ async function startPrintMode() {
     if (b && b.group) b.group.visible = false;
   }
 
-  // 서버의 현재 seq에 기준점을 맞춰 이전 출력의 진행 메시지를 무시
-  try {
-    const res = await fetch('/api/progress?after=999999999');
-    const j = await res.json();
-    printState.lastSeq = (j && j.latest) || 0;
-  } catch (e) {
-    printState.lastSeq = 0;
-  }
+  // 기준점: 발행 "직전"에 찍은 seq (이후 도착하는 메시지는 전부 이번 출력의 것)
+  printState.lastSeq = baselineSeq || 0;
 
   setStatus(`출력중... 로봇 조립 대기 (0/${printState.total})`, 'ok');
 
@@ -1437,6 +1443,7 @@ function handlePrintProgressBlock(block) {
     setStatus(`진행 수신: 화면에서 일치하는 블록을 찾지 못함 (${gx}, ${gy}, ${gz})`, 'bad');
     return;
   }
+  if (printedKeys.has(key)) return; // 이미 처리한 블록의 중복 메시지는 무시
 
   printedKeys.add(key);
   printState.revealed += 1;
