@@ -307,7 +307,7 @@ def main(args=None):
                     movel(pose_x_ready, vel=150, acc=ACC)
                     
                     pose_x_down = deepcopy(pose_x_ready)
-                    pose_x_down[2] = posx1[2] - 12  
+                    pose_x_down[2] = posx1[2] - 8  
                     movel(pose_x_down, vel=100, acc=ACC); wait(0.1)
                     
                     task_compliance_ctrl([3000, 3000, 5000, 200, 200, 200], 0); wait(0.1)
@@ -330,7 +330,7 @@ def main(args=None):
                     movel(pose_y_ready, vel=150, acc=ACC)
                     
                     pose_y_down = deepcopy(pose_y_ready)
-                    pose_y_down[2] = posx1[2] - 12
+                    pose_y_down[2] = posx1[2] - 8
                     movel(pose_y_down, vel=100, acc=ACC); wait(0.1)
                     
                     task_compliance_ctrl([3000, 3000, 5000, 200, 200, 200], 0); wait(0.1)
