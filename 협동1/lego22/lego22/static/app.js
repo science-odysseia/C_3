@@ -1135,6 +1135,19 @@ function matchKeybind(e, b) {
 }
 
 // ----- 단축키 동작 -----
+function stackTopZ(x, y) {
+  // 현재 블록 footprint가 (x,y)에 놓일 때, 그 아래 겹치는 기존 블록들 중
+  // 가장 높은 것 바로 위 높이를 반환 (아무것도 없으면 바닥 0)
+  const [sx, sy] = getCurrentBlockSize();
+  let top = -1;
+  for (const b of state.blocks.values()) {
+    const overlapXY = b.x < x + sx && b.x + b.sx > x &&
+                      b.y < y + sy && b.y + b.sy > y;
+    if (overlapXY && b.z > top) top = b.z;
+  }
+  return Math.min(20, top + 1);
+}
+
 function moveGhost(dx, dy, dz) {
   dz = dz || 0;
   // 예상 블록이 없으면 현재 좌표 입력값을 시작점으로 사용
@@ -1142,7 +1155,14 @@ function moveGhost(dx, dy, dz) {
     { x: numVal('input-x'), y: numVal('input-y'), z: numVal('input-z') };
   const nx = Math.max(-10, Math.min(10, sel.x + dx));
   const ny = Math.max(-10, Math.min(10, sel.y + dy));
-  const nz = Math.max(0, Math.min(20, sel.z + dz));
+  let nz;
+  if (dz !== 0) {
+    // W/S: z 수동 이동은 기존 그대로
+    nz = Math.max(0, Math.min(20, sel.z + dz));
+  } else {
+    // 좌우(x,y) 이동: 공중에 뜨지 않도록 그 자리 블록 더미의 맨 위로 자동 스냅
+    nz = stackTopZ(nx, ny);
+  }
   updatePreview(nx, ny, nz, '예상 블록 이동');
   setInputs(nx, ny, nz);
 }
