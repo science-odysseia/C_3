@@ -35,7 +35,7 @@ def generate_launch_description():
     # 3. 로봇 블록 조립 제어 노드 (on_exit 추가로 크래시 전파 방지)
     robot_move_blocks = Node(
         package='rokey',
-        executable='blocks',
+        executable='corner',
         name='rokey_move',
         output='screen', # 👈 에러 로그를 터미널에 뿌려주기 위해 필수
         on_exit=[] # 👈 이 노드가 죽어도 로봇 드라이버를 죽이지 않음
