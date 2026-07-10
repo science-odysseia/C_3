@@ -80,7 +80,7 @@ def resolve_static_dir():
     )
 
 
-def make_handler(static_dir, publish_centers_fn, save_map_fn, load_map_fn, list_maps_fn, thumb_fn, delete_map_fn, logger):
+def make_handler(static_dir, publish_centers_fn, save_map_fn, load_map_fn, list_maps_fn, thumb_fn, delete_map_fn, progress_fn, logger):
     class Handler(http.server.SimpleHTTPRequestHandler):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, directory=static_dir, **kwargs)
@@ -105,6 +105,23 @@ def make_handler(static_dir, publish_centers_fn, save_map_fn, load_map_fn, list_
             self.end_headers()
 
         def do_GET(self):
+            if self.path.startswith('/api/progress'):
+                # 로봇의 /current_block_status 진행 상황 조회 (?after=<seq> 이후 것만)
+                after = 0
+                if '?' in self.path:
+                    for part in self.path.split('?', 1)[1].split('&'):
+                        if part.startswith('after='):
+                            try:
+                                after = int(part.split('=', 1)[1])
+                            except ValueError:
+                                pass
+                try:
+                    data = progress_fn(after)
+                    self._send_json({'ok': True, **data})
+                except Exception as e:
+                    self._send_json({'ok': False, 'error': str(e)}, status=500)
+                return
+
             if self.path == '/api/maps':
                 # 저장 폴더 안의 맵 파일 목록 반환
                 try:
@@ -265,10 +282,17 @@ class LegoCadWebServerNode(Node):
         # /centers 발행자 (std_msgs/String, JSON 페이로드)
         self.centers_pub = self.create_publisher(String, 'centers', 10)
 
+        # /current_block_status 구독자 (로봇이 지금 조립 중인 블록) -> 웹 폴링용 버퍼
+        self._progress_lock = threading.Lock()
+        self._progress_items = []  # [{'seq': n, 'block': [...]}, ...] 최근 500개 유지
+        self._progress_seq = 0
+        self.block_status_sub = self.create_subscription(
+            String, '/current_block_status', self.on_block_status, 10)
+
         handler_cls = make_handler(
             self.static_dir, self.publish_centers,
             self.save_map, self.load_map, self.list_maps,
-            self.get_thumb, self.delete_map, self.get_logger()
+            self.get_thumb, self.delete_map, self.get_progress, self.get_logger()
         )
         # 8080이 사용 중이면 8081, 8082 ... 순으로 다음 포트를 자동으로 시도한다
         self.httpd, self.port = bind_server_with_retry(
@@ -416,6 +440,26 @@ class LegoCadWebServerNode(Node):
             return (0, int(m.group(1))) if m else (1, e['name'])
         items.sort(key=sort_key)
         return items
+
+    def on_block_status(self, msg):
+        """로봇이 발행하는 /current_block_status ([타입, [gx, gy, gz]] JSON) 수신."""
+        try:
+            block = json.loads(msg.data)
+        except Exception as e:
+            self.get_logger().warn(f"/current_block_status 파싱 실패: {e}")
+            return
+        with self._progress_lock:
+            self._progress_seq += 1
+            self._progress_items.append({'seq': self._progress_seq, 'block': block})
+            if len(self._progress_items) > 500:
+                self._progress_items = self._progress_items[-500:]
+        self.get_logger().info(f"조립 진행 수신 #{self._progress_seq}: {msg.data}")
+
+    def get_progress(self, after=0):
+        """seq가 after보다 큰 진행 항목들과 최신 seq를 반환 (웹 폴링용)."""
+        with self._progress_lock:
+            items = [it for it in self._progress_items if it['seq'] > after]
+            return {'latest': self._progress_seq, 'items': items}
 
     def publish_centers(self, centers):
         """centers: [[type_index, [cx, cy, cz]], ...] 형태의 리스트.

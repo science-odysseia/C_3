@@ -575,6 +575,8 @@ document.getElementById('btn-export').addEventListener('click', async () => {
     centers.push([typeIndex, [cx, cy, cz]]);
   }
 
+  if (printState.active) return; // 이미 출력 중이면 무시
+
   try {
     const res = await fetch('/api/publish_centers', {
       method: 'POST',
@@ -582,8 +584,12 @@ document.getElementById('btn-export').addEventListener('click', async () => {
       body: JSON.stringify(centers),
     });
     const json = await res.json();
-    if (json.ok) setStatus(`/centers 발행 완료 (${centers.length}개 블록)`, 'ok');
-    else setStatus(`발행 실패: ${json.error}`, 'bad');
+    if (json.ok) {
+      setStatus(`발행 완료 (${centers.length}개 블록)`, 'ok');
+      startPrintMode(); // 출력(조립) 진행 표시 모드 진입
+    } else {
+      setStatus(`발행 실패: ${json.error}`, 'bad');
+    }
   } catch (e) {
     setStatus(`발행 실패: ${e}`, 'bad');
   }
@@ -1313,3 +1319,159 @@ document.addEventListener('keydown', (e) => {
     console.error('[lego-cad] 단축키 처리 오류:', err);
   }
 });
+
+// ---------------- 출력(조립) 진행 상황 실황 표시 ----------------
+// 로봇이 /current_block_status 로 "지금 이 블록 조립 시작"을 발행하면
+// 서버가 버퍼링하고, 웹이 /api/progress 를 폴링해서 3D로 중계한다.
+const PRINT_POLL_MS = 500;             // 진행 상황 폴링 주기
+const PRINT_BLINK_MS = 400;            // 조립 중 블록 깜빡임 주기
+const PRINT_LAST_FINISH_MS = 15000;    // 마지막 블록 수신 후 완료 처리까지 대기
+const PRINT_IDLE_TIMEOUT_MS = 180000;  // 이 시간 동안 소식이 없으면 강제 종료 (안전장치)
+
+const printState = {
+  active: false,
+  total: 0,          // 이번 출력에서 로봇이 새로 조립할 블록 수
+  revealed: 0,       // 지금까지 진행 수신한 블록 수
+  lastSeq: 0,        // 마지막으로 처리한 서버 seq
+  blinkKey: null,    // 지금 깜빡이는 중(조립 중)인 블록 키
+  pollTimer: null, blinkTimer: null, idleTimer: null, finishTimer: null,
+};
+// 이전 출력에서 이미 조립 완료된 블록 키 (로봇 쪽 placed_blocks와 대응)
+const printedKeys = new Set();
+const btnExport = document.getElementById('btn-export');
+
+function findBlockByAnchor(ax, ay, az) {
+  for (const [key, b] of state.blocks) {
+    if (Math.abs(b.x - ax) < 1e-6 && Math.abs(b.y - ay) < 1e-6 && Math.abs(b.z - az) < 1e-6) {
+      return key;
+    }
+  }
+  return null;
+}
+
+async function startPrintMode() {
+  // 이번에 로봇이 새로 조립할 블록 = 아직 출력된 적 없는 블록
+  const pendingKeys = [...state.blocks.keys()].filter((k) => !printedKeys.has(k));
+  if (pendingKeys.length === 0) {
+    setStatus('새로 조립할 블록이 없습니다 (모두 이미 출력됨)', 'bad');
+    return;
+  }
+
+  printState.active = true;
+  printState.total = pendingKeys.length;
+  printState.revealed = 0;
+  printState.blinkKey = null;
+
+  if (btnExport) {
+    btnExport.disabled = true;
+    btnExport.textContent = '출력중...';
+  }
+  clearHighlight();
+  state.selectedCell = null;
+
+  // 아직 조립 안 된 블록만 화면에서 숨김 (이미 출력된 블록은 실물이 있으므로 유지)
+  for (const k of pendingKeys) {
+    const b = state.blocks.get(k);
+    if (b && b.group) b.group.visible = false;
+  }
+
+  // 서버의 현재 seq에 기준점을 맞춰 이전 출력의 진행 메시지를 무시
+  try {
+    const res = await fetch('/api/progress?after=999999999');
+    const j = await res.json();
+    printState.lastSeq = (j && j.latest) || 0;
+  } catch (e) {
+    printState.lastSeq = 0;
+  }
+
+  setStatus(`출력중... 로봇 조립 대기 (0/${printState.total})`, 'ok');
+
+  printState.blinkTimer = setInterval(() => {
+    if (!printState.blinkKey) return;
+    const b = state.blocks.get(printState.blinkKey);
+    if (b && b.group) b.group.visible = !b.group.visible;
+  }, PRINT_BLINK_MS);
+
+  printState.pollTimer = setInterval(pollPrintProgress, PRINT_POLL_MS);
+  armPrintIdleTimer();
+}
+
+function armPrintIdleTimer() {
+  if (printState.idleTimer) clearTimeout(printState.idleTimer);
+  printState.idleTimer = setTimeout(() => {
+    finishPrintMode('로봇 응답이 오래 없어 출력 표시를 종료합니다', 'bad');
+  }, PRINT_IDLE_TIMEOUT_MS);
+}
+
+async function pollPrintProgress() {
+  if (!printState.active) return;
+  let j;
+  try {
+    const res = await fetch(`/api/progress?after=${printState.lastSeq}`);
+    j = await res.json();
+  } catch (e) {
+    return; // 일시적 네트워크 오류는 다음 폴링에서 재시도
+  }
+  if (!j || !j.ok || !Array.isArray(j.items)) return;
+  for (const item of j.items) {
+    printState.lastSeq = item.seq;
+    handlePrintProgressBlock(item.block);
+    armPrintIdleTimer();
+  }
+}
+
+function handlePrintProgressBlock(block) {
+  // block: [타입, [gx, gy, gz]] — 로봇의 -0.5 변환 좌표는 웹 앵커 좌표와 동일
+  if (!printState.active || !Array.isArray(block) || !Array.isArray(block[1])) return;
+  const [gx, gy, gz] = block[1];
+
+  // 이전에 깜빡이던(조립하던) 블록은 실색 고정
+  if (printState.blinkKey) {
+    const prev = state.blocks.get(printState.blinkKey);
+    if (prev && prev.group) prev.group.visible = true;
+    printState.blinkKey = null;
+  }
+
+  const key = findBlockByAnchor(gx, gy, gz);
+  if (!key) {
+    setStatus(`진행 수신: 화면에서 일치하는 블록을 찾지 못함 (${gx}, ${gy}, ${gz})`, 'bad');
+    return;
+  }
+
+  printedKeys.add(key);
+  printState.revealed += 1;
+  printState.blinkKey = key;
+  const b = state.blocks.get(key);
+  if (b && b.group) b.group.visible = true; // 깜빡임 시작 (blinkTimer가 토글)
+
+  setStatus(`출력중... ${printState.revealed}/${printState.total} — 조립 중: (${gx}, ${gy}, ${gz})`, 'ok');
+
+  // 마지막 블록 수신 -> 일정 시간 깜빡인 뒤 완료 처리
+  if (printState.revealed >= printState.total) {
+    if (printState.finishTimer) clearTimeout(printState.finishTimer);
+    printState.finishTimer = setTimeout(() => {
+      finishPrintMode(`출력 완료! 블록 ${printState.total}개 조립됨`, 'ok');
+    }, PRINT_LAST_FINISH_MS);
+  }
+}
+
+function finishPrintMode(message, kind) {
+  printState.active = false;
+  if (printState.pollTimer) clearInterval(printState.pollTimer);
+  if (printState.blinkTimer) clearInterval(printState.blinkTimer);
+  if (printState.idleTimer) clearTimeout(printState.idleTimer);
+  if (printState.finishTimer) clearTimeout(printState.finishTimer);
+  printState.pollTimer = printState.blinkTimer = printState.idleTimer = printState.finishTimer = null;
+  printState.blinkKey = null;
+
+  // 모든 블록 실색 복구
+  for (const b of state.blocks.values()) {
+    if (b && b.group) b.group.visible = true;
+  }
+
+  if (btnExport) {
+    btnExport.disabled = false;
+    btnExport.textContent = '출력하기';
+  }
+  setStatus(message, kind);
+}
