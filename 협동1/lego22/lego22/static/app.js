@@ -35,6 +35,7 @@ const BLOCK_TYPE_INDEX = {
 const GRID_MIN = -10;
 const GRID_MAX = 9; // 포함 (python range(-10,10)과 동일한 20x20 칸)
 const COORD_LIMIT = 20;
+const MAX_Z = 30; // z축(높이) 최대 제한 — 필요하면 이 값만 바꾸면 됨
 
 // ---------------- 상태 ----------------
 const state = {
@@ -238,6 +239,12 @@ function setStatus(text, kind) {
 function addBlock(x, y, z) {
   const [sx, sy] = getCurrentBlockSize();
 
+  // z축 높이 제한
+  if (z < 0 || z > MAX_Z) {
+    setStatus(`높이 제한 초과: z는 0~${MAX_Z} 범위여야 합니다 (요청: ${z})`, 'bad');
+    return false;
+  }
+
   const footprint = [];
   for (let i = 0; i < sx; i++) {
     for (let j = 0; j < sy; j++) footprint.push([x + i, y + j, z]);
@@ -437,7 +444,7 @@ function handleCanvasClick(evt) {
   }
 
   const { x, y, z } = target;
-  if (Math.abs(x) > COORD_LIMIT || Math.abs(y) > COORD_LIMIT || Math.abs(z) > COORD_LIMIT) {
+  if (Math.abs(x) > COORD_LIMIT || Math.abs(y) > COORD_LIMIT || z < 0 || z > MAX_Z) {
     setStatus(`범위 밖 선택: (${x}, ${y}, ${z})`, 'bad');
     return;
   }
@@ -1145,7 +1152,7 @@ function stackTopZ(x, y) {
                       b.y < y + sy && b.y + b.sy > y;
     if (overlapXY && b.z > top) top = b.z;
   }
-  return Math.min(20, top + 1);
+  return Math.min(MAX_Z, top + 1);
 }
 
 function moveGhost(dx, dy, dz) {
@@ -1158,7 +1165,7 @@ function moveGhost(dx, dy, dz) {
   let nz;
   if (dz !== 0) {
     // W/S: z 수동 이동은 기존 그대로
-    nz = Math.max(0, Math.min(20, sel.z + dz));
+    nz = Math.max(0, Math.min(MAX_Z, sel.z + dz));
   } else {
     // 좌우(x,y) 이동: 공중에 뜨지 않도록 그 자리 블록 더미의 맨 위로 자동 스냅
     nz = stackTopZ(nx, ny);
