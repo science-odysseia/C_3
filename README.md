@@ -7,14 +7,14 @@
 
 ### 1-1. 시스템 설계도 (System Architecture)
 <p align ="center">
-  <img src="./images/system_architecture.png" alt="시스템 설계도 이미지"
+  <img src="./img/system_architecture.png" alt="시스템 설계도 이미지"
   width="400">
 </p>
  * * 설명: [pc와 매니퓰레이터 간의 통신 구조를 나타냅니다.] *
 
 ### 1-2. 플로우 차트 (Flow chart)
 <p align ="center">
-  <img src="./images/flow_chart.png" alt ="플로우 차트 이미지"
+  <img src="./img/flow_chart.png" alt ="플로우 차트 이미지"
   wdith="300" height="300">
 </p>
 * * 설명: [UI부터 전체 프로세스 진행도를 나타냅니다.]*
