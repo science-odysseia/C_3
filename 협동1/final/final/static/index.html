@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>LEGO CAD Builder</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="style.css?v=0.2.2" />
+</head>
+<body>
+  <div id="app">
+    <div id="viewport">
+      <canvas id="scene"></canvas>
+      <button id="btn-keybind" title="단축키 설정">⚙</button>
+      <div id="hint">좌클릭: 칸 선택/배치 위치 지정 · 우클릭 드래그: 화면 회전 · 휠: 확대/축소 · ⚙: 단축키 설정</div>
+    </div>
+
+    <aside id="panel">
+      <header>
+        <span class="brick">▮▮</span>
+        <h1>LEGO CAD</h1>
+      </header>
+
+      <section>
+        <h2>색상 선택</h2>
+        <div id="color-list" class="chip-list"></div>
+      </section>
+
+      <section>
+        <h2>블록 종류</h2>
+        <div id="block-type-list" class="chip-list"></div>
+        <button id="btn-rotate" class="btn secondary">⤾ 블록 회전 (가로 ↔ 세로)</button>
+      </section>
+
+      <section>
+        <h2>좌표</h2>
+        <div class="coord-row">
+          <label>X <input type="number" id="input-x" value="0" min="-20" max="20" /></label>
+          <label>Y <input type="number" id="input-y" value="0" min="-20" max="20" /></label>
+          <label>Z <input type="number" id="input-z" value="0" min="-20" max="20" /></label>
+        </div>
+      </section>
+
+      <section class="btn-col">
+        <button id="btn-add" class="btn primary">입력 좌표에 블록 추가</button>
+        <button id="btn-delete-at" class="btn">입력 좌표 블록 삭제</button>
+        <button id="btn-delete-last" class="btn">마지막 블록 삭제</button>
+        <button id="btn-clear-all" class="btn danger">🗑 맵 초기화 (전체 삭제)</button>
+      </section>
+
+      <section class="btn-row">
+        <button id="btn-save" class="btn">💾 저장하기</button>
+        <button id="btn-load" class="btn">📂 불러오기</button>
+      </section>
+
+      <section>
+        <h2>저장된 맵</h2>
+        <div id="map-gallery"></div>
+      </section>
+
+      <section class="btn-col">
+        <button id="btn-export" class="btn secondary">출력하기</button>
+        <button id="btn-interrupt" class="btn danger" disabled>중단하기</button>
+      </section>
+
+      <footer>
+        <div id="status">현재 색상: red</div>
+      </footer>
+    </aside>
+  </div>
+
+  <!-- 출력 중단 시 표시되는 TCP 수동 조작 화면 -->
+  <div id="manual-overlay" hidden>
+    <main id="manual-panel" role="dialog" aria-modal="true" aria-labelledby="manual-title">
+      <div class="manual-alert">OUTPUT INTERRUPTED</div>
+      <h1 id="manual-title">DOOSAN MANUAL TCP CONTROL</h1>
+      <div id="manual-status">수동 조작 준비 중...</div>
+      <p class="manual-help">방향 버튼을 누르는 동안 이동하며, 놓으면 즉시 정지합니다.</p>
+
+      <div class="manual-jog-grid">
+        <button class="manual-jog" data-key="j"><kbd>J</kbd><span>X−</span></button>
+        <button class="manual-jog" data-key="l"><kbd>L</kbd><span>X+</span></button>
+        <button class="manual-jog" data-key="k"><kbd>K</kbd><span>Y−</span></button>
+        <button class="manual-jog" data-key="i"><kbd>I</kbd><span>Y+</span></button>
+        <button class="manual-jog" data-key="s"><kbd>S</kbd><span>Z−</span></button>
+        <button class="manual-jog" data-key="w"><kbd>W</kbd><span>Z+</span></button>
+      </div>
+
+      <div class="manual-actions">
+        <button id="manual-gripper-open" type="button">그리퍼 열기<br><small>50 mm / 40 N</small></button>
+        <button id="manual-gripper-close" type="button">그리퍼 닫기<br><small>0 mm / 40 N</small></button>
+        <button id="manual-position" type="button">현재 TCP 위치</button>
+        <button id="manual-home" type="button">Home Joint</button>
+      </div>
+
+      <div id="manual-position-display">TCP 위치: —</div>
+      <button id="manual-resume" type="button">
+        수동 조작 종료 → /interrupt=false → LEGO CAD로 돌아가기
+      </button>
+    </main>
+  </div>
+
+  <!-- /collision=true 수신 시 기존 Tkinter UI 대신 표시되는 웹 Recovery 화면 -->
+  <div id="recovery-overlay" hidden>
+    <main id="recovery-panel" role="dialog" aria-modal="true" aria-labelledby="recovery-title">
+      <div class="recovery-alert">COLLISION RECOVERY</div>
+      <h1 id="recovery-title">DOOSAN RECOVERY JOINT JOG</h1>
+      <div id="recovery-state">Recovery 진입 대기</div>
+      <div id="recovery-status">충돌 신호 처리 중...</div>
+      <p class="recovery-help">−/+ 버튼을 누르는 동안 연속 이동합니다.<br>버튼을 놓거나 포인터가 벗어나면 즉시 정지합니다.</p>
+      <div id="recovery-joints"></div>
+      <button id="recovery-close" type="button">
+        조그 정지 → Mode 1 복귀 → LEGO CAD로 돌아가기
+      </button>
+    </main>
+  </div>
+
+  <!-- 단축키 설정 모달 -->
+  <div id="keybind-overlay" hidden>
+    <div id="keybind-modal">
+      <div class="kb-title">⌨ 단축키 설정</div>
+      <div id="keybind-list"></div>
+      <div class="kb-hint">키 버튼을 클릭한 뒤 원하는 키(조합)를 누르면 변경됩니다 · ESC: 변경 취소</div>
+      <div class="kb-footer">
+        <button id="kb-reset" class="btn">기본값 복원</button>
+        <button id="kb-close" class="btn primary">닫기</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+  <script src="app.js?v=0.2.2"></script>
+</body>
+</html>

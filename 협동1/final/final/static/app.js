@@ -17,10 +17,11 @@ const COLORS = {
 };
 
 const BLOCK_SIZES = {
-  "1x1": [1, 1],
-  "1x2": [1, 2],
+  // 2x2 블록만 사용하기로 함 (다른 종류는 비활성화)
+  // "1x1": [1, 1],
+  // "1x2": [1, 2],
   "2x2": [2, 2],
-  "2x3": [2, 3],
+  // "2x3": [2, 3],
 };
 
 // 블록 종류 -> 번호 (요청된 규칙: 1x1=0, 1x2=1, 2x2=2, 2x3=3)
@@ -34,6 +35,7 @@ const BLOCK_TYPE_INDEX = {
 const GRID_MIN = -10;
 const GRID_MAX = 9; // 포함 (python range(-10,10)과 동일한 20x20 칸)
 const COORD_LIMIT = 20;
+const MAX_Z = 15; // z축(높이) 최대 제한 — 필요하면 이 값만 바꾸면 됨
 
 // ---------------- 상태 ----------------
 const state = {
@@ -41,7 +43,7 @@ const state = {
   cellToBlock: new Map(),  // key "x,y,z" -> blockKey
   blockOrder: [],          // 추가된 순서 (마지막 블록 삭제용)
   selectedCell: null,      // {x,y,z} | null
-  currentBlockType: "1x1",
+  currentBlockType: "2x2",
   currentRotated: false,
   currentColorName: "red",
   highlightGroup: null,
@@ -237,6 +239,12 @@ function setStatus(text, kind) {
 function addBlock(x, y, z) {
   const [sx, sy] = getCurrentBlockSize();
 
+  // z축 높이 제한
+  if (z < 0 || z > MAX_Z) {
+    setStatus(`높이 제한 초과: z는 0~${MAX_Z} 범위여야 합니다 (요청: ${z})`, 'bad');
+    return false;
+  }
+
   const footprint = [];
   for (let i = 0; i < sx; i++) {
     for (let j = 0; j < sy; j++) footprint.push([x + i, y + j, z]);
@@ -319,8 +327,15 @@ function deleteLastBlock() {
     return;
   }
   const key = state.blockOrder[state.blockOrder.length - 1];
+  const b = state.blocks.get(key);
   removeBlock(key);
-  setStatus(`삭제: ${key}`, 'ok');
+  if (b) {
+    // 삭제한 블록 자리로 예상 블록 이동 -> 엔터로 다시 놓기(redo)도 가능
+    updatePreview(b.x, b.y, b.z, '되돌리기');
+    setInputs(b.x, b.y, b.z);
+  } else {
+    setStatus(`삭제: ${key}`, 'ok');
+  }
 }
 
 // ---------------- 미리보기 / 선택 ----------------
@@ -429,7 +444,7 @@ function handleCanvasClick(evt) {
   }
 
   const { x, y, z } = target;
-  if (Math.abs(x) > COORD_LIMIT || Math.abs(y) > COORD_LIMIT || Math.abs(z) > COORD_LIMIT) {
+  if (Math.abs(x) > COORD_LIMIT || Math.abs(y) > COORD_LIMIT || z < 0 || z > MAX_Z) {
     setStatus(`범위 밖 선택: (${x}, ${y}, ${z})`, 'bad');
     return;
   }
@@ -447,6 +462,12 @@ function handleCanvasClick(evt) {
 
 canvas.addEventListener('pointerdown', (evt) => {
   console.log('[lego-cad] canvas pointerdown, button =', evt.button, 'pointerType =', evt.pointerType);
+  // 좌표 입력창 등에 포커스가 남아 있으면 해제 -> 3D 화면 클릭 후 단축키가 바로 동작하도록
+  const ae = document.activeElement;
+  if (ae && typeof ae.blur === 'function' &&
+      (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT')) {
+    ae.blur();
+  }
   if (evt.button !== 0) return; // 좌클릭만 처리 (0=좌, 1=휠, 2=우)
   try {
     handleCanvasClick(evt);
@@ -519,11 +540,28 @@ document.getElementById('btn-rotate').addEventListener('click', () => {
 
 document.getElementById('btn-add').addEventListener('click', () => {
   const x = numVal('input-x'), y = numVal('input-y'), z = numVal('input-z');
-  addBlock(x, y, z);
+  if (addBlock(x, y, z)) {
+    // 블록을 놓으면 예상 블록을 방금 놓은 블록 바로 위(z+1)로 이동
+    updatePreview(x, y, z + 1, '예상 블록 위로 이동');
+    setInputs(x, y, z + 1);
+  }
 });
 
 document.getElementById('btn-delete-at').addEventListener('click', deleteBlockAtInput);
 document.getElementById('btn-delete-last').addEventListener('click', deleteLastBlock);
+
+const btnClearAll = document.getElementById('btn-clear-all');
+if (btnClearAll) btnClearAll.addEventListener('click', async () => {
+  const n = state.blockOrder.length;
+  if (n === 0) {
+    setStatus('삭제할 블록이 없습니다', 'bad');
+    return;
+  }
+  const ok = await showConfirmDialog(`블록 ${n}개를 모두 삭제하고 맵을 초기화할까요?`, '초기화');
+  if (!ok) return;
+  clearAllBlocks();
+  setStatus(`맵 초기화 완료: 블록 ${n}개 삭제`, 'ok');
+});
 
 document.getElementById('btn-export').addEventListener('click', async () => {
   // [블록타입 번호, [cx, cy, cz]] 리스트 생성
@@ -537,6 +575,24 @@ document.getElementById('btn-export').addEventListener('click', async () => {
     centers.push([typeIndex, [cx, cy, cz]]);
   }
 
+  if (printState.active) return; // 이미 출력 중이면 무시
+
+  // 출력 버튼을 새로 누를 때마다 현재 맵 전체를 이번 출력 대상으로 취급한다.
+  // 같은 블록을 다시 출력해도 /current_block_status에 맞춰 다시 깜빡이게 한다.
+  printedKeys.clear();
+
+  // [중요] 발행 "전에" 진행 seq 기준점을 먼저 찍는다.
+  // 발행 후에 찍으면, 로봇이 곧바로 보낸 첫 블록 메시지가 기준점 안에 포함되어
+  // 버려지는 경합이 생김 (첫 블록이 안 깜빡이고 한 단계 밀려 보이는 원인)
+  let baselineSeq = 0;
+  try {
+    const pre = await fetch('/api/progress?after=999999999');
+    const pj = await pre.json();
+    baselineSeq = (pj && pj.latest) || 0;
+  } catch (e) {
+    baselineSeq = 0;
+  }
+
   try {
     const res = await fetch('/api/publish_centers', {
       method: 'POST',
@@ -544,8 +600,12 @@ document.getElementById('btn-export').addEventListener('click', async () => {
       body: JSON.stringify(centers),
     });
     const json = await res.json();
-    if (json.ok) setStatus(`/centers 발행 완료 (${centers.length}개 블록)`, 'ok');
-    else setStatus(`발행 실패: ${json.error}`, 'bad');
+    if (json.ok) {
+      setStatus(`발행 완료 (${centers.length}개 블록)`, 'ok');
+      startPrintMode(baselineSeq); // 출력(조립) 진행 표시 모드 진입
+    } else {
+      setStatus(`발행 실패: ${json.error}`, 'bad');
+    }
   } catch (e) {
     setStatus(`발행 실패: ${e}`, 'bad');
   }
@@ -631,6 +691,7 @@ function captureThumbnail() {
 // ----- 페이지 내장 대화상자 (window.prompt/confirm 은 환경에 따라 차단될 수 있음) -----
 function makeDialogOverlay() {
   const overlay = document.createElement('div');
+  overlay.dataset.dialog = '1'; // 모달 열림 감지용 (단축키 비활성화)
   overlay.style.cssText =
     'position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;' +
     'align-items:center;justify-content:center;z-index:1100;';
@@ -811,6 +872,7 @@ function showLoadModal(maps) {
   closeLoadModal();
 
   const overlay = document.createElement('div');
+  overlay.dataset.dialog = '1'; // 모달 열림 감지용 (단축키 비활성화)
   overlay.style.cssText =
     'position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;' +
     'align-items:center;justify-content:center;z-index:1000;';
@@ -1026,3 +1088,727 @@ async function refreshGallery() {
 }
 
 refreshGallery();
+
+// ---------------- 단축키 (기어 버튼 / 키 바인딩) ----------------
+const KEYBIND_STORAGE_KEY = 'final_keybinds_v1';
+
+const KEYBIND_ACTIONS = [
+  { id: 'undo',      label: '되돌리기 (마지막 블록 삭제)' },
+  { id: 'place',     label: '예상 블록 위치에 블록 놓기' },
+  { id: 'moveUp',    label: '예상 블록 이동: +Y' },
+  { id: 'moveDown',  label: '예상 블록 이동: -Y' },
+  { id: 'moveLeft',  label: '예상 블록 이동: -X' },
+  { id: 'moveRight', label: '예상 블록 이동: +X' },
+  { id: 'moveZUp',   label: '예상 블록 이동: +Z (위)' },
+  { id: 'moveZDown', label: '예상 블록 이동: -Z (아래)' },
+];
+
+const DEFAULT_KEYBINDS = {
+  undo:      { code: 'KeyZ',       ctrl: true,  shift: false, alt: false },
+  place:     { code: 'Enter',      ctrl: false, shift: false, alt: false },
+  moveUp:    { code: 'ArrowUp',    ctrl: false, shift: false, alt: false },
+  moveDown:  { code: 'ArrowDown',  ctrl: false, shift: false, alt: false },
+  moveLeft:  { code: 'ArrowLeft',  ctrl: false, shift: false, alt: false },
+  moveRight: { code: 'ArrowRight', ctrl: false, shift: false, alt: false },
+  moveZUp:   { code: 'KeyW',       ctrl: false, shift: false, alt: false },
+  moveZDown: { code: 'KeyS',       ctrl: false, shift: false, alt: false },
+};
+
+function loadKeybinds() {
+  try {
+    const raw = localStorage.getItem(KEYBIND_STORAGE_KEY);
+    if (raw) {
+      const saved = JSON.parse(raw);
+      const out = {};
+      for (const a of KEYBIND_ACTIONS) {
+        const b = saved[a.id];
+        out[a.id] = (b && typeof b.code === 'string')
+          ? { code: b.code, ctrl: !!b.ctrl, shift: !!b.shift, alt: !!b.alt }
+          : { ...DEFAULT_KEYBINDS[a.id] };
+      }
+      return out;
+    }
+  } catch (e) { /* localStorage 사용 불가 환경이면 기본값 사용 */ }
+  return JSON.parse(JSON.stringify(DEFAULT_KEYBINDS));
+}
+
+function saveKeybinds() {
+  try { localStorage.setItem(KEYBIND_STORAGE_KEY, JSON.stringify(keybinds)); } catch (e) { /* 무시 */ }
+}
+
+let keybinds = loadKeybinds();
+let kbCapturingAction = null; // 지금 키 입력을 기다리는 액션 id
+
+function codeLabel(code) {
+  if (code.startsWith('Key')) return code.slice(3);
+  if (code.startsWith('Digit')) return code.slice(5);
+  if (code.startsWith('Numpad')) return 'Num' + code.slice(6);
+  const map = { ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→', Space: 'Space' };
+  return map[code] || code;
+}
+
+function keybindText(b) {
+  const parts = [];
+  if (b.ctrl) parts.push('Ctrl');
+  if (b.alt) parts.push('Alt');
+  if (b.shift) parts.push('Shift');
+  parts.push(codeLabel(b.code));
+  return parts.join(' + ');
+}
+
+function matchKeybind(e, b) {
+  return e.code === b.code &&
+         e.ctrlKey === !!b.ctrl &&
+         e.shiftKey === !!b.shift &&
+         e.altKey === !!b.alt;
+}
+
+// ----- 단축키 동작 -----
+function stackTopZ(x, y) {
+  // 현재 블록 footprint가 (x,y)에 놓일 때, 그 아래 겹치는 기존 블록들 중
+  // 가장 높은 것 바로 위 높이를 반환 (아무것도 없으면 바닥 0)
+  const [sx, sy] = getCurrentBlockSize();
+  let top = -1;
+  for (const b of state.blocks.values()) {
+    const overlapXY = b.x < x + sx && b.x + b.sx > x &&
+                      b.y < y + sy && b.y + b.sy > y;
+    if (overlapXY && b.z > top) top = b.z;
+  }
+  return Math.min(MAX_Z, top + 1);
+}
+
+function moveGhost(dx, dy, dz) {
+  dz = dz || 0;
+  // 예상 블록이 없으면 현재 좌표 입력값을 시작점으로 사용
+  const sel = state.selectedCell ||
+    { x: numVal('input-x'), y: numVal('input-y'), z: numVal('input-z') };
+  const nx = Math.max(-10, Math.min(10, sel.x + dx));
+  const ny = Math.max(-10, Math.min(10, sel.y + dy));
+  let nz;
+  if (dz !== 0) {
+    // W/S: z 수동 이동은 기존 그대로
+    nz = Math.max(0, Math.min(MAX_Z, sel.z + dz));
+  } else {
+    // 좌우(x,y) 이동: 공중에 뜨지 않도록 그 자리 블록 더미의 맨 위로 자동 스냅
+    nz = stackTopZ(nx, ny);
+  }
+  updatePreview(nx, ny, nz, '예상 블록 이동');
+  setInputs(nx, ny, nz);
+}
+
+function placeAtGhost() {
+  const sel = state.selectedCell;
+  if (!sel) {
+    setStatus('예상 블록이 없습니다. 칸을 클릭하거나 방향키로 위치를 지정하세요.', 'bad');
+    return;
+  }
+  if (addBlock(sel.x, sel.y, sel.z)) {
+    // 놓은 블록 바로 위(z+1)로 예상 블록 이동
+    updatePreview(sel.x, sel.y, sel.z + 1, '예상 블록 위로 이동');
+    setInputs(sel.x, sel.y, sel.z + 1);
+  }
+}
+
+// ----- 설정 모달 -----
+const keybindOverlay = document.getElementById('keybind-overlay');
+const keybindListEl = document.getElementById('keybind-list');
+const btnKeybindEl = document.getElementById('btn-keybind');
+const kbUiReady = !!(keybindOverlay && keybindListEl && btnKeybindEl);
+if (!kbUiReady) {
+  console.warn('[lego-cad] 단축키 UI 요소를 찾지 못했습니다. index.html이 예전 버전(캐시)일 수 있습니다. 단축키 설정 창 없이 기본 단축키만 동작합니다.');
+}
+
+function renderKeybindList() {
+  if (!kbUiReady) return;
+  keybindListEl.innerHTML = '';
+  for (const a of KEYBIND_ACTIONS) {
+    const row = document.createElement('div');
+    row.className = 'kb-row';
+
+    const label = document.createElement('label');
+    label.textContent = a.label;
+
+    const btn = document.createElement('button');
+    btn.className = 'kb-key';
+    if (kbCapturingAction === a.id) {
+      btn.classList.add('capturing');
+      btn.textContent = '키 입력 대기중...';
+    } else {
+      btn.textContent = keybindText(keybinds[a.id]);
+    }
+    btn.addEventListener('click', () => {
+      kbCapturingAction = (kbCapturingAction === a.id) ? null : a.id;
+      renderKeybindList();
+    });
+
+    row.appendChild(label);
+    row.appendChild(btn);
+    keybindListEl.appendChild(row);
+  }
+}
+
+if (kbUiReady) {
+  btnKeybindEl.addEventListener('click', () => {
+    kbCapturingAction = null;
+    renderKeybindList();
+    keybindOverlay.hidden = false;
+  });
+  const kbClose = document.getElementById('kb-close');
+  const kbReset = document.getElementById('kb-reset');
+  if (kbClose) kbClose.addEventListener('click', () => {
+    kbCapturingAction = null;
+    keybindOverlay.hidden = true;
+  });
+  if (kbReset) kbReset.addEventListener('click', () => {
+    keybinds = JSON.parse(JSON.stringify(DEFAULT_KEYBINDS));
+    saveKeybinds();
+    kbCapturingAction = null;
+    renderKeybindList();
+  });
+  keybindOverlay.addEventListener('click', (e) => {
+    if (e.target === keybindOverlay) {
+      kbCapturingAction = null;
+      keybindOverlay.hidden = true;
+    }
+  });
+}
+
+// ----- 전역 keydown 처리 -----
+const MODIFIER_CODES = new Set([
+  'ControlLeft', 'ControlRight', 'ShiftLeft', 'ShiftRight',
+  'AltLeft', 'AltRight', 'MetaLeft', 'MetaRight',
+]);
+
+document.addEventListener('keydown', (e) => {
+  try {
+  // 1) 단축키 변경(캡처) 모드
+  if (kbCapturingAction) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.key === 'Escape') { // 변경 취소
+      kbCapturingAction = null;
+      renderKeybindList();
+      return;
+    }
+    if (MODIFIER_CODES.has(e.code)) return; // 수식키 단독 입력은 대기 유지
+
+    const newBind = { code: e.code, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey };
+    // 다른 액션에 같은 키가 이미 있으면 그쪽을 기본값으로 되돌려 충돌 방지
+    for (const a of KEYBIND_ACTIONS) {
+      if (a.id !== kbCapturingAction && matchKeybind(
+            { code: newBind.code, ctrlKey: newBind.ctrl, shiftKey: newBind.shift, altKey: newBind.alt },
+            keybinds[a.id])) {
+        keybinds[a.id] = { ...DEFAULT_KEYBINDS[a.id] };
+      }
+    }
+    keybinds[kbCapturingAction] = newBind;
+    kbCapturingAction = null;
+    saveKeybinds();
+    renderKeybindList();
+    return;
+  }
+
+  // 2) 단축키 설정 모달이 열려 있으면 ESC로 닫기만 허용
+  if (keybindOverlay && !keybindOverlay.hidden) {
+    if (e.key === 'Escape') {
+      kbCapturingAction = null;
+      keybindOverlay.hidden = true;
+    }
+    return;
+  }
+
+  // 3) 입력창에 포커스가 있거나 저장/불러오기 모달이 열려 있으면 단축키 무시
+  const tag = (document.activeElement && document.activeElement.tagName) || '';
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  if (document.querySelector('[data-dialog]')) return;
+
+  // 4) 단축키 실행
+  if (matchKeybind(e, keybinds.undo))           { e.preventDefault(); deleteLastBlock(); }
+  else if (matchKeybind(e, keybinds.place))     { e.preventDefault(); placeAtGhost(); }
+  else if (matchKeybind(e, keybinds.moveUp))    { e.preventDefault(); moveGhost(0, +1); }
+  else if (matchKeybind(e, keybinds.moveDown))  { e.preventDefault(); moveGhost(0, -1); }
+  else if (matchKeybind(e, keybinds.moveLeft))  { e.preventDefault(); moveGhost(-1, 0); }
+  else if (matchKeybind(e, keybinds.moveRight)) { e.preventDefault(); moveGhost(+1, 0); }
+  else if (matchKeybind(e, keybinds.moveZUp))   { e.preventDefault(); moveGhost(0, 0, +1); }
+  else if (matchKeybind(e, keybinds.moveZDown)) { e.preventDefault(); moveGhost(0, 0, -1); }
+  } catch (err) {
+    console.error('[lego-cad] 단축키 처리 오류:', err);
+  }
+});
+
+// ---------------- 출력(조립) 진행 상황 실황 표시 ----------------
+// 로봇이 /current_block_status 로 "지금 이 블록 조립 시작"을 발행하면
+// 서버가 버퍼링하고, 웹이 /api/progress 를 폴링해서 3D로 중계한다.
+const PRINT_POLL_MS = 500;             // 진행 상황 폴링 주기
+const PRINT_BLINK_MS = 400;            // 조립 중 블록 깜빡임 주기
+const PRINT_LAST_FINISH_MS = 15000;    // 마지막 블록 수신 후 완료 처리까지 대기
+const PRINT_IDLE_TIMEOUT_MS = 180000;  // 이 시간 동안 소식이 없으면 강제 종료 (안전장치)
+
+const printState = {
+  active: false,
+  total: 0,          // 이번 출력에서 로봇이 새로 조립할 블록 수
+  revealed: 0,       // 지금까지 진행 수신한 블록 수
+  lastSeq: 0,        // 마지막으로 처리한 서버 seq
+  blinkKey: null,    // 지금 깜빡이는 중(조립 중)인 블록 키
+  pollTimer: null, blinkTimer: null, idleTimer: null, finishTimer: null,
+};
+// 이전 출력에서 이미 조립 완료된 블록 키 (로봇 쪽 placed_blocks와 대응)
+const printedKeys = new Set();
+const btnExport = document.getElementById('btn-export');
+const btnInterrupt = document.getElementById('btn-interrupt');
+
+function findBlockByAnchor(ax, ay, az) {
+  for (const [key, b] of state.blocks) {
+    if (Math.abs(b.x - ax) < 1e-6 && Math.abs(b.y - ay) < 1e-6 && Math.abs(b.z - az) < 1e-6) {
+      return key;
+    }
+  }
+  return null;
+}
+
+async function startPrintMode(baselineSeq) {
+  // 이번에 로봇이 새로 조립할 블록 = 아직 출력된 적 없는 블록
+  const pendingKeys = [...state.blocks.keys()].filter((k) => !printedKeys.has(k));
+  if (pendingKeys.length === 0) {
+    setStatus('새로 조립할 블록이 없습니다 (모두 이미 출력됨)', 'bad');
+    return;
+  }
+
+  printState.active = true;
+  printState.total = pendingKeys.length;
+  printState.revealed = 0;
+  printState.blinkKey = null;
+
+  if (btnExport) {
+    btnExport.disabled = true;
+    btnExport.textContent = '출력중...';
+  }
+  if (btnInterrupt) btnInterrupt.disabled = false;
+  clearHighlight();
+  state.selectedCell = null;
+
+  // 아직 조립 안 된 블록만 화면에서 숨김 (이미 출력된 블록은 실물이 있으므로 유지)
+  for (const k of pendingKeys) {
+    const b = state.blocks.get(k);
+    if (b && b.group) b.group.visible = false;
+  }
+
+  // 기준점: 발행 "직전"에 찍은 seq (이후 도착하는 메시지는 전부 이번 출력의 것)
+  printState.lastSeq = baselineSeq || 0;
+
+  setStatus(`출력중... 로봇 조립 대기 (0/${printState.total})`, 'ok');
+
+  printState.blinkTimer = setInterval(() => {
+    if (!printState.blinkKey) return;
+    const b = state.blocks.get(printState.blinkKey);
+    if (b && b.group) b.group.visible = !b.group.visible;
+  }, PRINT_BLINK_MS);
+
+  printState.pollTimer = setInterval(pollPrintProgress, PRINT_POLL_MS);
+  armPrintIdleTimer();
+}
+
+function armPrintIdleTimer() {
+  if (printState.idleTimer) clearTimeout(printState.idleTimer);
+  printState.idleTimer = setTimeout(() => {
+    finishPrintMode('로봇 응답이 오래 없어 출력 표시를 종료합니다', 'bad');
+  }, PRINT_IDLE_TIMEOUT_MS);
+}
+
+async function pollPrintProgress() {
+  if (!printState.active) return;
+  let j;
+  try {
+    const res = await fetch(`/api/progress?after=${printState.lastSeq}`);
+    j = await res.json();
+  } catch (e) {
+    return; // 일시적 네트워크 오류는 다음 폴링에서 재시도
+  }
+  if (!j || !j.ok || !Array.isArray(j.items)) return;
+  for (const item of j.items) {
+    printState.lastSeq = item.seq;
+    handlePrintProgressBlock(item.block);
+    armPrintIdleTimer();
+  }
+}
+
+function handlePrintProgressBlock(block) {
+  // block: [타입, [gx, gy, gz]] — 로봇의 -0.5 변환 좌표는 웹 앵커 좌표와 동일
+  if (!printState.active || !Array.isArray(block) || !Array.isArray(block[1])) return;
+  const [gx, gy, gz] = block[1];
+
+  // 이전에 깜빡이던(조립하던) 블록은 실색 고정
+  if (printState.blinkKey) {
+    const prev = state.blocks.get(printState.blinkKey);
+    if (prev && prev.group) prev.group.visible = true;
+    printState.blinkKey = null;
+  }
+
+  const key = findBlockByAnchor(gx, gy, gz);
+  if (!key) {
+    setStatus(`진행 수신: 화면에서 일치하는 블록을 찾지 못함 (${gx}, ${gy}, ${gz})`, 'bad');
+    return;
+  }
+  if (printedKeys.has(key)) return; // 이미 처리한 블록의 중복 메시지는 무시
+
+  printedKeys.add(key);
+  printState.revealed += 1;
+  printState.blinkKey = key;
+  const b = state.blocks.get(key);
+  if (b && b.group) b.group.visible = true; // 깜빡임 시작 (blinkTimer가 토글)
+
+  setStatus(`출력중... ${printState.revealed}/${printState.total} — 조립 중: (${gx}, ${gy}, ${gz})`, 'ok');
+
+  // 마지막 블록 수신 -> 일정 시간 깜빡인 뒤 완료 처리
+  if (printState.revealed >= printState.total) {
+    if (printState.finishTimer) clearTimeout(printState.finishTimer);
+    printState.finishTimer = setTimeout(() => {
+      finishPrintMode(`출력 완료! 블록 ${printState.total}개 조립됨`, 'ok');
+    }, PRINT_LAST_FINISH_MS);
+  }
+}
+
+function finishPrintMode(message, kind) {
+  printState.active = false;
+  if (printState.pollTimer) clearInterval(printState.pollTimer);
+  if (printState.blinkTimer) clearInterval(printState.blinkTimer);
+  if (printState.idleTimer) clearTimeout(printState.idleTimer);
+  if (printState.finishTimer) clearTimeout(printState.finishTimer);
+  printState.pollTimer = printState.blinkTimer = printState.idleTimer = printState.finishTimer = null;
+  printState.blinkKey = null;
+
+  // 모든 블록 실색 복구
+  for (const b of state.blocks.values()) {
+    if (b && b.group) b.group.visible = true;
+  }
+
+  if (btnExport) {
+    btnExport.disabled = false;
+    btnExport.textContent = '출력하기';
+  }
+  if (btnInterrupt) btnInterrupt.disabled = true;
+  setStatus(message, kind);
+}
+
+// =============================================================
+// 출력 중단 및 수동 TCP 조작 UI
+// =============================================================
+const manualOverlay = document.getElementById('manual-overlay');
+const manualStatusEl = document.getElementById('manual-status');
+const manualPositionEl = document.getElementById('manual-position-display');
+const manualResumeBtn = document.getElementById('manual-resume');
+const manualJogButtons = [...document.querySelectorAll('.manual-jog')];
+const manualActionButtons = [
+  document.getElementById('manual-gripper-open'),
+  document.getElementById('manual-gripper-close'),
+  document.getElementById('manual-position'),
+  document.getElementById('manual-home'),
+].filter(Boolean);
+let manualVisible = false;
+let manualStartPromise = null;
+let manualHeartbeatTimer = null;
+let manualKeyboardKey = null;
+
+async function manualPost(path, payload = {}) {
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const result = await response.json();
+  if (!response.ok || !result.ok) {
+    throw new Error(result.error || `HTTP ${response.status}`);
+  }
+  return result;
+}
+
+if (btnInterrupt) btnInterrupt.addEventListener('click', async () => {
+  if (!printState.active) return;
+  btnInterrupt.disabled = true;
+  finishPrintMode('사용자가 출력을 중단했습니다.', 'bad');
+  try {
+    await manualPost('/api/interrupt/start');
+  } catch (error) {
+    setStatus(`중단 요청 실패: ${error.message}`, 'bad');
+  }
+});
+
+async function startManualJog(key, event) {
+  if (event) event.preventDefault();
+  manualStartPromise = manualPost('/api/manual/jog', { key });
+  let result;
+  try {
+    result = await manualStartPromise;
+  } catch (error) {
+    manualStatusEl.textContent = `조그 시작 오류: ${error.message}`;
+    manualStartPromise = null;
+    return;
+  }
+  if (!result.started) {
+    manualStartPromise = null;
+    return;
+  }
+  if (manualHeartbeatTimer) clearInterval(manualHeartbeatTimer);
+  manualHeartbeatTimer = setInterval(() => {
+    manualPost('/api/manual/jog', { key }).catch(() => {});
+  }, 150);
+}
+
+async function stopManualJog(event) {
+  if (event) event.preventDefault();
+  const pending = manualStartPromise;
+  manualStartPromise = null;
+  if (manualHeartbeatTimer) clearInterval(manualHeartbeatTimer);
+  manualHeartbeatTimer = null;
+  if (pending) await pending;
+  try {
+    await manualPost('/api/manual/stop');
+  } catch (error) {
+    if (manualVisible) manualStatusEl.textContent = `조그 정지 오류: ${error.message}`;
+  }
+}
+
+for (const button of manualJogButtons) {
+  const key = button.dataset.key;
+  button.addEventListener('pointerdown', event => startManualJog(key, event));
+  button.addEventListener('pointerup', stopManualJog);
+  button.addEventListener('pointercancel', stopManualJog);
+  button.addEventListener('pointerleave', event => {
+    if (event.buttons) stopManualJog(event);
+  });
+}
+
+document.getElementById('manual-gripper-open').addEventListener('click', () => {
+  manualPost('/api/manual/gripper', { command: 'open' })
+    .catch(error => { manualStatusEl.textContent = `그리퍼 오류: ${error.message}`; });
+});
+document.getElementById('manual-gripper-close').addEventListener('click', () => {
+  manualPost('/api/manual/gripper', { command: 'close' })
+    .catch(error => { manualStatusEl.textContent = `그리퍼 오류: ${error.message}`; });
+});
+document.getElementById('manual-position').addEventListener('click', () => {
+  manualPost('/api/manual/position')
+    .catch(error => { manualStatusEl.textContent = `위치 조회 오류: ${error.message}`; });
+});
+document.getElementById('manual-home').addEventListener('click', () => {
+  manualPost('/api/manual/home')
+    .catch(error => { manualStatusEl.textContent = `Home 이동 오류: ${error.message}`; });
+});
+
+manualResumeBtn.addEventListener('click', async () => {
+  manualResumeBtn.disabled = true;
+  manualJogButtons.forEach(button => { button.disabled = true; });
+  manualStatusEl.textContent = '수동 조작 종료 및 /interrupt=false 처리 중...';
+  try {
+    await stopManualJog();
+    await manualPost('/api/interrupt/resume');
+  } catch (error) {
+    manualStatusEl.textContent = `복귀 요청 오류: ${error.message}`;
+    manualResumeBtn.disabled = Boolean(data.busy);
+  }
+});
+
+window.addEventListener('pointerup', event => {
+  if (manualVisible && event.buttons === 0) stopManualJog();
+});
+window.addEventListener('blur', () => {
+  if (manualVisible) stopManualJog();
+});
+window.addEventListener('keydown', event => {
+  if (!manualVisible) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  const key = event.key.toLowerCase();
+  if (!['i', 'k', 'j', 'l', 'w', 's'].includes(key)) return;
+  if (manualKeyboardKey === key) return;
+  if (manualKeyboardKey !== null) stopManualJog();
+  manualKeyboardKey = key;
+  startManualJog(key);
+}, true);
+window.addEventListener('keyup', event => {
+  if (!manualVisible) return;
+  const key = event.key.toLowerCase();
+  if (key !== manualKeyboardKey) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  manualKeyboardKey = null;
+  stopManualJog();
+}, true);
+
+async function pollManualState() {
+  try {
+    const response = await fetch('/api/manual', { cache: 'no-store' });
+    const data = await response.json();
+    if (!data.ok || !data.available) return;
+    manualVisible = Boolean(data.active);
+    manualOverlay.hidden = !manualVisible;
+    if (!manualVisible) return;
+
+    manualStatusEl.textContent = data.status || '';
+    const ready = Boolean(data.ready);
+    const disabled = !ready || Boolean(data.busy);
+    manualJogButtons.forEach(button => { button.disabled = disabled; });
+    manualActionButtons.forEach(button => { button.disabled = disabled || Boolean(data.moving); });
+    manualResumeBtn.disabled = false;
+
+    if (Array.isArray(data.tcp_position) && data.tcp_position.length >= 6) {
+      const labels = ['X', 'Y', 'Z', 'RX', 'RY', 'RZ'];
+      const parts = labels.map((label, index) =>
+        `${label}: ${Number(data.tcp_position[index]).toFixed(2)}`);
+      manualPositionEl.textContent = `TCP ${parts.join(' · ')} · Solution: ${data.solution}`;
+    }
+  } catch (_) {
+    // 일시적인 서버 지연은 다음 폴링에서 자동 복구한다.
+  }
+}
+
+setInterval(pollManualState, 100);
+pollManualState();
+
+// =============================================================
+// Doosan Collision Recovery 웹 UI
+// /collision=true 전에는 완전히 숨겨 두고, 서버 상태를 짧게 폴링한다.
+// =============================================================
+const recoveryOverlay = document.getElementById('recovery-overlay');
+const recoveryStateEl = document.getElementById('recovery-state');
+const recoveryStatusEl = document.getElementById('recovery-status');
+const recoveryJointsEl = document.getElementById('recovery-joints');
+const recoveryCloseBtn = document.getElementById('recovery-close');
+const recoveryValueEls = [];
+const recoveryJogButtons = [];
+let recoveryVisible = false;
+let recoveryStartPromise = null;
+let recoveryHeartbeatTimer = null;
+
+async function recoveryPost(path, payload = {}) {
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const result = await response.json();
+  if (!response.ok || !result.ok) {
+    throw new Error(result.error || `HTTP ${response.status}`);
+  }
+  return result;
+}
+
+async function startRecoveryJog(joint, direction, event) {
+  event.preventDefault();
+  if (event.currentTarget.disabled) return;
+  recoveryStartPromise = recoveryPost('/api/recovery/jog', { joint, direction })
+    .catch(error => { recoveryStatusEl.textContent = `조그 시작 오류: ${error.message}`; });
+  await recoveryStartPromise;
+  if (recoveryHeartbeatTimer) clearInterval(recoveryHeartbeatTimer);
+  recoveryHeartbeatTimer = setInterval(() => {
+    recoveryPost('/api/recovery/jog', { joint, direction }).catch(() => {});
+  }, 200);
+}
+
+async function stopRecoveryJog(event) {
+  if (event) event.preventDefault();
+  const pending = recoveryStartPromise;
+  recoveryStartPromise = null;
+  if (recoveryHeartbeatTimer) clearInterval(recoveryHeartbeatTimer);
+  recoveryHeartbeatTimer = null;
+  if (pending) await pending;
+  try {
+    await recoveryPost('/api/recovery/stop');
+  } catch (error) {
+    if (recoveryVisible) recoveryStatusEl.textContent = `조그 정지 오류: ${error.message}`;
+  }
+}
+
+for (let joint = 0; joint < 6; joint += 1) {
+  const row = document.createElement('div');
+  row.className = 'recovery-joint-row';
+
+  const name = document.createElement('span');
+  name.className = 'recovery-joint-name';
+  name.textContent = `J${joint + 1}`;
+
+  const minus = document.createElement('button');
+  minus.type = 'button';
+  minus.className = 'recovery-jog minus';
+  minus.textContent = '−';
+  minus.disabled = true;
+
+  const value = document.createElement('span');
+  value.className = 'recovery-joint-value';
+  value.textContent = '0.00°';
+
+  const plus = document.createElement('button');
+  plus.type = 'button';
+  plus.className = 'recovery-jog plus';
+  plus.textContent = '+';
+  plus.disabled = true;
+
+  minus.addEventListener('pointerdown', event => startRecoveryJog(joint, -1, event));
+  plus.addEventListener('pointerdown', event => startRecoveryJog(joint, 1, event));
+  for (const button of [minus, plus]) {
+    button.addEventListener('pointerup', stopRecoveryJog);
+    button.addEventListener('pointercancel', stopRecoveryJog);
+    button.addEventListener('pointerleave', event => {
+      if (event.buttons) stopRecoveryJog(event);
+    });
+  }
+
+  row.append(name, minus, value, plus);
+  recoveryJointsEl.appendChild(row);
+  recoveryValueEls.push(value);
+  recoveryJogButtons.push(minus, plus);
+}
+
+window.addEventListener('pointerup', event => {
+  if (recoveryVisible && event.buttons === 0) stopRecoveryJog();
+});
+window.addEventListener('blur', () => {
+  if (recoveryVisible) stopRecoveryJog();
+});
+window.addEventListener('keydown', event => {
+  if (!recoveryVisible) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}, true);
+
+recoveryCloseBtn.addEventListener('click', async () => {
+  recoveryCloseBtn.disabled = true;
+  recoveryJogButtons.forEach(button => { button.disabled = true; });
+  recoveryStatusEl.textContent = '조그 정지 및 Mode 1 복귀 처리 중...';
+  try {
+    await stopRecoveryJog();
+    await recoveryPost('/api/recovery/close');
+  } catch (error) {
+    recoveryStatusEl.textContent = `복귀 요청 오류: ${error.message}`;
+    recoveryCloseBtn.disabled = false;
+  }
+});
+
+async function pollRecoveryState() {
+  try {
+    const response = await fetch('/api/recovery', { cache: 'no-store' });
+    const data = await response.json();
+    if (!data.ok || !data.available) return;
+
+    recoveryVisible = Boolean(data.active);
+    recoveryOverlay.hidden = !recoveryVisible;
+    if (!recoveryVisible) return;
+
+    const stateValue = data.robot_state == null ? '—' : data.robot_state;
+    recoveryStateEl.textContent = `robot_state=${stateValue} (${data.state_name || 'UNKNOWN'})`;
+    recoveryStatusEl.textContent = data.status || '';
+    const joints = Array.isArray(data.joints) ? data.joints : [];
+    recoveryValueEls.forEach((element, index) => {
+      const value = Number(joints[index] || 0);
+      element.textContent = `${value.toFixed(2)}°`;
+    });
+    const jogEnabled = Boolean(data.ready) && !data.closing;
+    recoveryJogButtons.forEach(button => { button.disabled = !jogEnabled; });
+    recoveryCloseBtn.disabled = Boolean(data.closing);
+  } catch (_) {
+    // 일시적인 서버 지연은 다음 폴링에서 자동 복구한다.
+  }
+}
+
+setInterval(pollRecoveryState, 100);
+pollRecoveryState();

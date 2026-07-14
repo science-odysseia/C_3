@@ -35,7 +35,7 @@ const BLOCK_TYPE_INDEX = {
 const GRID_MIN = -10;
 const GRID_MAX = 9; // 포함 (python range(-10,10)과 동일한 20x20 칸)
 const COORD_LIMIT = 20;
-const MAX_Z = 30; // z축(높이) 최대 제한 — 필요하면 이 값만 바꾸면 됨
+const MAX_Z = 15; // z축(높이) 최대 제한 — 필요하면 이 값만 바꾸면 됨
 
 // ---------------- 상태 ----------------
 const state = {

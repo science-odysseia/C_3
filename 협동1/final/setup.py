@@ -2,7 +2,7 @@ import os
 from glob import glob
 from setuptools import find_packages, setup
 
-package_name = 'lego_cad_web'
+package_name = 'final'
 
 # static/ 아래 모든 파일을 재귀적으로 찾아서 share/<pkg>/static/... 로 설치
 static_files = []
@@ -17,7 +17,7 @@ for dirpath, _dirnames, filenames in os.walk(static_root):
 
 setup(
     name=package_name,
-    version='0.1.0',
+    version='0.2.2',
     packages=find_packages(exclude=['test']),
     data_files=[
         ('share/ament_index/resource_index/packages',
@@ -28,12 +28,12 @@ setup(
     zip_safe=True,
     maintainer='user',
     maintainer_email='user@example.com',
-    description='PyQt LEGO CAD 빌더의 웹(Three.js) 버전을 ros2 run 으로 띄우는 패키지',
+    description='웹 LEGO CAD, 충돌 Recovery 및 출력 중단 수동 조작을 통합한 ROS2 패키지',
     license='MIT',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'lego_cad_web = lego_cad_web.web_server_node:main',
+            'final = final.web_server_node:main',
         ],
     },
 )

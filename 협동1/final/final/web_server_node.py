@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-lego_cad_web_server
+final_server
 --------------------
 PyQt5 + pyqtgraph 로 만들어졌던 LEGO CAD 빌더를 브라우저(Three.js)에서 쓸 수 있도록
 정적 파일을 서빙하고, "출력하기" 버튼을 눌렀을 때 지금까지 쌓은 블록들의 중심 좌표를
 /centers 토픽으로 한 번 발행해주는 ROS2 노드.
 
 실행:
-    ros2 run lego_cad_web lego_cad_web
+    ros2 run final final
 
 실행 후 브라우저에서 http://localhost:8080 (또는 지정한 포트) 접속.
 
@@ -36,12 +36,14 @@ import base64
 import re
 import json
 import threading
+import time
 import http.server
 import socketserver
 
 import rclpy
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 
 try:
     from ament_index_python.packages import get_package_share_directory
@@ -63,7 +65,7 @@ def resolve_static_dir():
     (colcon build 전 로컬 실행 등) 못 찾으면 소스 트리의 static/ 을 사용한다."""
     if get_package_share_directory is not None:
         try:
-            share_dir = get_package_share_directory('lego_cad_web')
+            share_dir = get_package_share_directory('final')
             candidate = os.path.join(share_dir, 'static')
             if os.path.isdir(candidate):
                 return candidate
@@ -80,13 +82,25 @@ def resolve_static_dir():
     )
 
 
-def make_handler(static_dir, publish_centers_fn, save_map_fn, load_map_fn, list_maps_fn, thumb_fn, delete_map_fn, logger):
+def make_handler(static_dir, publish_centers_fn, save_map_fn, load_map_fn,
+                 list_maps_fn, thumb_fn, delete_map_fn, progress_fn,
+                 recovery_controller, manual_controller, set_interrupt_fn,
+                 logger):
     class Handler(http.server.SimpleHTTPRequestHandler):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, directory=static_dir, **kwargs)
 
         def log_message(self, fmt, *args):
             logger.debug("%s - %s" % (self.address_string(), fmt % args))
+
+        def end_headers(self):
+            # ROS 패키지를 다시 빌드한 뒤 브라우저가 예전 index/app.js를
+            # 재사용하면 Recovery UI가 누락될 수 있으므로 정적/API 응답을
+            # 캐시하지 않는다.
+            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Expires', '0')
+            super().end_headers()
 
         def _send_json(self, obj, status=200):
             body = json.dumps(obj, ensure_ascii=False).encode('utf-8')
@@ -105,6 +119,49 @@ def make_handler(static_dir, publish_centers_fn, save_map_fn, load_map_fn, list_
             self.end_headers()
 
         def do_GET(self):
+            if self.path == '/api/manual':
+                if manual_controller is None:
+                    self._send_json({
+                        'ok': True, 'available': False, 'active': False,
+                        'status': '수동 조작 모듈을 불러오지 못했습니다.',
+                    })
+                else:
+                    self._send_json({
+                        'ok': True, 'available': True,
+                        **manual_controller.snapshot(),
+                    })
+                return
+
+            if self.path == '/api/recovery':
+                if recovery_controller is None:
+                    self._send_json({
+                        'ok': True, 'available': False, 'active': False,
+                        'status': 'Doosan Recovery 모듈을 불러오지 못했습니다.',
+                    })
+                else:
+                    self._send_json({
+                        'ok': True, 'available': True,
+                        **recovery_controller.snapshot(),
+                    })
+                return
+
+            if self.path.startswith('/api/progress'):
+                # 로봇의 /current_block_status 진행 상황 조회 (?after=<seq> 이후 것만)
+                after = 0
+                if '?' in self.path:
+                    for part in self.path.split('?', 1)[1].split('&'):
+                        if part.startswith('after='):
+                            try:
+                                after = int(part.split('=', 1)[1])
+                            except ValueError:
+                                pass
+                try:
+                    data = progress_fn(after)
+                    self._send_json({'ok': True, **data})
+                except Exception as e:
+                    self._send_json({'ok': False, 'error': str(e)}, status=500)
+                return
+
             if self.path == '/api/maps':
                 # 저장 폴더 안의 맵 파일 목록 반환
                 try:
@@ -155,6 +212,80 @@ def make_handler(static_dir, publish_centers_fn, save_map_fn, load_map_fn, list_
             super().do_GET()
 
         def do_POST(self):
+            if self.path.startswith('/api/interrupt/'):
+                if manual_controller is None:
+                    self._send_json({
+                        'ok': False, 'error': '수동 조작 모듈을 사용할 수 없습니다.',
+                    }, status=503)
+                    return
+                try:
+                    if self.path == '/api/interrupt/start':
+                        set_interrupt_fn(True)
+                    elif self.path == '/api/interrupt/resume':
+                        set_interrupt_fn(False)
+                    else:
+                        self._send_json({'ok': False, 'error': '알 수 없는 API'}, status=404)
+                        return
+                    self._send_json({'ok': True})
+                except Exception as e:
+                    self._send_json({'ok': False, 'error': str(e)}, status=500)
+                return
+
+            if self.path.startswith('/api/manual/'):
+                if manual_controller is None:
+                    self._send_json({
+                        'ok': False, 'error': '수동 조작 모듈을 사용할 수 없습니다.',
+                    }, status=503)
+                    return
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    raw = self.rfile.read(length) if length > 0 else b'{}'
+                    payload = json.loads(raw.decode('utf-8'))
+                    if self.path == '/api/manual/jog':
+                        result = manual_controller.start_jog(payload.get('key'))
+                    elif self.path == '/api/manual/stop':
+                        result = manual_controller.stop_jog()
+                    elif self.path == '/api/manual/gripper':
+                        result = manual_controller.gripper(payload.get('command'))
+                    elif self.path == '/api/manual/position':
+                        result = manual_controller.read_position()
+                    elif self.path == '/api/manual/home':
+                        result = manual_controller.move_home()
+                    else:
+                        self._send_json({'ok': False, 'error': '알 수 없는 API'}, status=404)
+                        return
+                    self._send_json({'ok': True, 'started': bool(result)})
+                except Exception as e:
+                    self._send_json({'ok': False, 'error': str(e)}, status=500)
+                return
+
+            if self.path.startswith('/api/recovery/'):
+                if recovery_controller is None:
+                    self._send_json({
+                        'ok': False,
+                        'error': 'Doosan Recovery 모듈을 사용할 수 없습니다.',
+                    }, status=503)
+                    return
+                try:
+                    if self.path == '/api/recovery/jog':
+                        length = int(self.headers.get('Content-Length', 0))
+                        raw = self.rfile.read(length) if length > 0 else b'{}'
+                        payload = json.loads(raw.decode('utf-8'))
+                        started = recovery_controller.start_jog(
+                            payload.get('joint'), payload.get('direction'))
+                        self._send_json({'ok': True, 'started': started})
+                    elif self.path == '/api/recovery/stop':
+                        recovery_controller.stop_jog()
+                        self._send_json({'ok': True})
+                    elif self.path == '/api/recovery/close':
+                        started = recovery_controller.close_recovery()
+                        self._send_json({'ok': True, 'started': started})
+                    else:
+                        self._send_json({'ok': False, 'error': '알 수 없는 API'}, status=404)
+                except Exception as e:
+                    self._send_json({'ok': False, 'error': str(e)}, status=500)
+                return
+
             if self.path == '/api/publish_centers':
                 try:
                     length = int(self.headers.get('Content-Length', 0))
@@ -228,21 +359,29 @@ def bind_server_with_retry(host, start_port, handler_cls, logger, max_tries=10):
         except OSError as e:
             last_err = e
             if getattr(e, 'errno', None) == 98:  # Address already in use
-                logger.warn(f"포트 {port} 이(가) 이미 사용 중입니다. 다음 포트로 재시도합니다...")
+                if offset < max_tries - 1:
+                    logger.warn(f"포트 {port} 이(가) 이미 사용 중입니다. 다음 포트로 재시도합니다...")
                 continue
             raise
 
+    if max_tries == 1:
+        raise RuntimeError(
+            f"포트 {start_port} 이(가) 이미 사용 중이라 서버를 시작할 수 없습니다 "
+            f"(마지막 오류: {last_err}). "
+            f"해당 포트를 쓰는 프로세스를 종료한 뒤 다시 실행해 주세요. "
+            f"(확인: 'lsof -i :{start_port}' 또는 'fuser -k {start_port}/tcp')"
+        )
     raise RuntimeError(
         f"{start_port}번부터 {start_port + max_tries - 1}번까지 포트를 모두 사용할 수 없습니다 "
         f"(마지막 오류: {last_err}). "
-        f"'ros2 run lego_cad_web lego_cad_web --ros-args -p port:=<다른_포트번호>' 로 "
+        f"'ros2 run final final --ros-args -p port:=<다른_포트번호>' 로 "
         f"직접 포트를 지정해서 실행해 보세요."
     )
 
 
-class LegoCadWebServerNode(Node):
-    def __init__(self):
-        super().__init__('lego_cad_web_server')
+class FinalWebServerNode(Node):
+    def __init__(self, recovery_controller=None, manual_controller=None):
+        super().__init__('final_server')
 
         self.declare_parameter('port', 8080)
         self.declare_parameter('host', '0.0.0.0')
@@ -257,13 +396,34 @@ class LegoCadWebServerNode(Node):
         # /centers 발행자 (std_msgs/String, JSON 페이로드)
         self.centers_pub = self.create_publisher(String, 'centers', 10)
 
+        # /interrupt 상태는 평상시 false, 중단 수동 조작 중 true를 유지한다.
+        self.interrupt_pub = self.create_publisher(Bool, '/interrupt', 10)
+        self._interrupt_lock = threading.Lock()
+        self._interrupt_state = False
+        self._interrupt_ready = False
+        self.manual_controller = manual_controller
+        self.interrupt_ready_sub = self.create_subscription(
+            Bool, '/interrupt_ready', self.on_interrupt_ready, 10)
+        self.interrupt_timer = self.create_timer(0.5, self.publish_interrupt_state)
+        self.publish_interrupt_state()
+
+        # /current_block_status 구독자 (로봇이 지금 조립 중인 블록) -> 웹 폴링용 버퍼
+        self._progress_lock = threading.Lock()
+        self._progress_items = []  # [{'seq': n, 'block': [...]}, ...] 최근 500개 유지
+        self._progress_seq = 0
+        self.block_status_sub = self.create_subscription(
+            String, '/current_block_status', self.on_block_status, 10)
+
         handler_cls = make_handler(
             self.static_dir, self.publish_centers,
             self.save_map, self.load_map, self.list_maps,
-            self.get_thumb, self.delete_map, self.get_logger()
+            self.get_thumb, self.delete_map, self.get_progress,
+            recovery_controller, manual_controller, self.set_interrupt,
+            self.get_logger()
         )
+        # 8080이 사용 중이면 8081, 8082 ... 순으로 다음 포트를 자동으로 시도한다
         self.httpd, self.port = bind_server_with_retry(
-            self.host, requested_port, handler_cls, self.get_logger()
+            self.host, requested_port, handler_cls, self.get_logger(), max_tries=10
         )
 
         self.get_logger().info(f"정적 파일 경로: {self.static_dir}")
@@ -276,6 +436,7 @@ class LegoCadWebServerNode(Node):
             f"(같은 네트워크에서는 http://<이_PC_IP>:{self.port})"
         )
         self.get_logger().info("웹 UI의 '출력하기' 버튼을 누르면 /centers 토픽으로 한 번 발행됩니다.")
+        self.get_logger().info("/interrupt=false 상태로 시작합니다.")
         self.get_logger().info(f"저장/불러오기 폴더 (sav_path): {self.sav_path}")
 
     # ---------- 저장/불러오기 ----------
@@ -408,6 +569,26 @@ class LegoCadWebServerNode(Node):
         items.sort(key=sort_key)
         return items
 
+    def on_block_status(self, msg):
+        """로봇이 발행하는 /current_block_status ([타입, [gx, gy, gz]] JSON) 수신."""
+        try:
+            block = json.loads(msg.data)
+        except Exception as e:
+            self.get_logger().warn(f"/current_block_status 파싱 실패: {e}")
+            return
+        with self._progress_lock:
+            self._progress_seq += 1
+            self._progress_items.append({'seq': self._progress_seq, 'block': block})
+            if len(self._progress_items) > 500:
+                self._progress_items = self._progress_items[-500:]
+        self.get_logger().info(f"조립 진행 수신 #{self._progress_seq}: {msg.data}")
+
+    def get_progress(self, after=0):
+        """seq가 after보다 큰 진행 항목들과 최신 seq를 반환 (웹 폴링용)."""
+        with self._progress_lock:
+            items = [it for it in self._progress_items if it['seq'] > after]
+            return {'latest': self._progress_seq, 'items': items}
+
     def publish_centers(self, centers):
         """centers: [[type_index, [cx, cy, cz]], ...] 형태의 리스트.
         std_msgs/String 에 JSON으로 인코딩해서 /centers 로 한 번 발행한다."""
@@ -415,6 +596,43 @@ class LegoCadWebServerNode(Node):
         msg.data = json.dumps(centers, ensure_ascii=False)
         self.centers_pub.publish(msg)
         self.get_logger().info(f"/centers 발행: 블록 {len(centers)}개 -> {msg.data}")
+
+    def publish_interrupt_state(self):
+        with self._interrupt_lock:
+            value = self._interrupt_state
+        msg = Bool()
+        msg.data = value
+        self.interrupt_pub.publish(msg)
+
+    def on_interrupt_ready(self, msg):
+        ready = bool(msg.data)
+        with self._interrupt_lock:
+            changed = self._interrupt_ready != ready
+            self._interrupt_ready = ready
+        if self.manual_controller is not None:
+            self.manual_controller.set_ready(ready)
+        if changed:
+            self.get_logger().info(
+                f"/interrupt_ready={str(ready).lower()} 수신"
+            )
+
+    def set_interrupt(self, value):
+        value = bool(value)
+        with self._interrupt_lock:
+            self._interrupt_state = value
+            if value:
+                self._interrupt_ready = False
+        if value:
+            # 대기 UI부터 띄우되, ready 수신 전까지 모든 조작을 잠근다.
+            if self.manual_controller is not None:
+                self.manual_controller.activate()
+            self.publish_interrupt_state()
+        else:
+            # 수동 이동을 완전히 정지한 뒤 중단 신호를 해제한다.
+            if self.manual_controller is not None:
+                self.manual_controller.deactivate()
+            self.publish_interrupt_state()
+        self.get_logger().warn(f"/interrupt={str(value).lower()} 발행")
 
     def serve_forever(self):
         self.httpd.serve_forever()
@@ -427,23 +645,102 @@ class LegoCadWebServerNode(Node):
 def main(args=None):
     rclpy.init(args=args)
 
+    recovery_node = None
+    manual_controller = None
+    dsr_node = None
     try:
-        node = LegoCadWebServerNode()
+        import DR_init
+        DR_init.__dsr__id = 'dsr01'
+        DR_init.__dsr__model = 'm0609'
+        # DSR_ROBOT2 전용 노드는 원본 코드와 동일하게 executor에 넣지 않는다.
+        dsr_node = rclpy.create_node(
+            'collision_jog_dsr_api', namespace='dsr01')
+        DR_init.__dsr__node = dsr_node
+        from final.recovery_controller import CollisionRecoveryNode
+        recovery_node = CollisionRecoveryNode()
+    except ImportError as e:
+        print(
+            f"[final] Doosan Recovery 모듈 비활성화 (import 실패): {e}",
+            file=__import__('sys').stderr,
+        )
+        if dsr_node is not None:
+            dsr_node.destroy_node()
+            dsr_node = None
+
+    if recovery_node is not None:
+        try:
+            from final.manual_controller import InterruptManualController
+            manual_controller = InterruptManualController(
+                recovery_node.get_logger())
+        except ImportError as e:
+            print(
+                f"[final] 중단 수동 조작 모듈 비활성화 (import 실패): {e}",
+                file=__import__('sys').stderr,
+            )
+
+    try:
+        node = FinalWebServerNode(recovery_node, manual_controller)
     except RuntimeError as e:
-        print(f"[lego_cad_web] 시작 실패: {e}", file=__import__('sys').stderr)
+        print(f"[final] 시작 실패: {e}", file=__import__('sys').stderr)
+        if recovery_node is not None:
+            recovery_node.destroy_node()
+        if dsr_node is not None:
+            dsr_node.destroy_node()
         rclpy.shutdown()
         return 1
 
     server_thread = threading.Thread(target=node.serve_forever, daemon=True)
     server_thread.start()
 
+    # 브라우저 자동 오픈 (localhost:<실제 바인딩된 포트>)
+    # 매 실행마다 다른 URL을 열어 기존 탭/브라우저 캐시의 index.html을 피한다.
+    url = f'http://localhost:{node.port}/?run={int(time.time())}'
+    opened = False
     try:
-        rclpy.spin(node)
+        import webbrowser
+        opened = bool(webbrowser.open(url))
+    except Exception:
+        opened = False
+    if not opened:
+        # webbrowser 가 실패하는 환경(WSL, xdg 미설정 등)을 위한 폴백
+        import shutil
+        import subprocess
+        for cmd in (['xdg-open', url], ['wslview', url],
+                    ['cmd.exe', '/c', 'start', '', url], ['open', url]):
+            if shutil.which(cmd[0]):
+                try:
+                    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    opened = True
+                    break
+                except Exception:
+                    continue
+    if opened:
+        node.get_logger().info(f"브라우저를 자동으로 열었습니다 -> {url}")
+    else:
+        node.get_logger().warn(f"브라우저 자동 오픈에 실패했습니다. 직접 접속해 주세요 -> {url}")
+
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
+    if recovery_node is not None:
+        executor.add_node(recovery_node)
+
+    try:
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
+        node.set_interrupt(False)
+        if manual_controller is not None:
+            manual_controller.shutdown()
+        if recovery_node is not None:
+            recovery_node.shutdown_controller()
+        executor.shutdown()
         node.shutdown()
         node.destroy_node()
+        if recovery_node is not None:
+            recovery_node.destroy_node()
+        if dsr_node is not None:
+            dsr_node.destroy_node()
         rclpy.shutdown()
 
 
